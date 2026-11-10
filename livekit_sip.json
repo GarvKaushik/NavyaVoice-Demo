@@ -1,0 +1,19 @@
+{
+  "sip_trunk": {
+    "name": "Plivo Mumbai Zentrunk",
+    "inbound_addresses": ["zendesk-trunk.plivo.com", "sip.plivo.com"],
+    "numbers": ["+911401234567"]
+  },
+  "dispatch_rules": [
+    {
+      "name": "Outbound Sales Dispatch",
+      "rule": {
+        "dispatch_rule_individual": {
+          "room_prefix": "call_"
+        }
+      },
+      "metadata": "campaign_outbound_mumbai"
+    }
+  ]
+}
+

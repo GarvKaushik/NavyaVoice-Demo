@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-workers
+  namespace: voice-agent
+  labels:
+    app: agent-workers
+spec:
+  replicas: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 20%
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: agent-workers
+  template:
+    metadata:
+      labels:
+        app: agent-workers
+    spec:
+      # Graceful shutdown: up to 15 minutes for in-flight calls to conclude
+      terminationGracePeriodSeconds: 900
+      containers:
+      - name: agent-worker
+        image: registry.mumbai.internal/voiceagent-worker:v1.0.0
+        command: ["python", "-m", "agent.worker"]
+        resources:
+          requests:
+            cpu: "2"
+            memory: 4Gi
+          limits:
+            cpu: "4"
+            memory: 8Gi
+        envFrom:
+        - secretRef:
+            name: voice-agent-secrets
+        - configMapRef:
+            name: voice-agent-config
+        lifecycle:
+          preStop:
+            exec:
+              # Signal worker to stop accepting new dispatches and drain existing
+              command: ["/bin/sh", "-c", "kill -SIGUSR1 1 && sleep 10"]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: agent-workers-hpa
+  namespace: voice-agent
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: agent-workers
+  minReplicas: 4
+  maxReplicas: 30
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: active_voice_calls_per_worker
+      target:
+        type: AverageValue
+        averageValue: 20
+

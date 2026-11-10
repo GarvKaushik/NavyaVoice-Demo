@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: campaign-api
+  namespace: voice-agent
+  labels:
+    app: campaign-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: campaign-api
+  template:
+    metadata:
+      labels:
+        app: campaign-api
+    spec:
+      containers:
+      - name: api
+        image: registry.mumbai.internal/voiceagent-api:v1.0.0
+        ports:
+        - containerPort: 8000
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: "500m"
+            memory: 1Gi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        envFrom:
+        - secretRef:
+            name: voice-agent-secrets
+        - configMapRef:
+            name: voice-agent-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: campaign-api
+  namespace: voice-agent
+spec:
+  selector:
+    app: campaign-api
+  ports:
+  - port: 8000
+    targetPort: 8000
+

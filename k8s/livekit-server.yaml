@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: livekit-server
+  namespace: voice-agent
+  labels:
+    app: livekit-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: livekit-server
+  template:
+    metadata:
+      labels:
+        app: livekit-server
+    spec:
+      containers:
+      - name: livekit-server
+        image: livekit/livekit-server:v1.7.0
+        ports:
+        - containerPort: 7880
+          name: tcp-signaling
+        - containerPort: 7881
+          name: tcp-rtc
+        - containerPort: 7882
+          protocol: UDP
+          name: udp-rtc
+        resources:
+          requests:
+            cpu: "2"
+            memory: 4Gi
+          limits:
+            cpu: "4"
+            memory: 8Gi
+        env:
+        - name: LIVEKIT_CONFIG
+          value: |
+            port: 7880
+            rtc:
+              tcp_port: 7881
+              udp_port: 7882
+            redis:
+              address: redis-mumbai.internal:6379
+            keys:
+              apiKey: ${LIVEKIT_API_KEY}
+              apiSecret: ${LIVEKIT_API_SECRET}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: livekit-server
+  namespace: voice-agent
+spec:
+  selector:
+    app: livekit-server
+  ports:
+  - port: 7880
+    name: signaling
+  - port: 7881
+    name: rtc-tcp
+  - port: 7882
+    protocol: UDP
+    name: rtc-udp
+
