@@ -41,8 +41,8 @@ class Settings(BaseSettings):
     STT_PROVIDER: Literal["sarvam", "indicconformer", "whisper_hinglish"] = Field(
         default="indicconformer", description="Live speech-to-text; the local engines run on the STT server"
     )
-    LLM_PROVIDER: Literal["sarvam", "openai", "selfhosted"] = Field(default="openai", description="Real-time LLM")
-    LLM_FALLBACK_PROVIDER: Literal["", "sarvam", "openai", "selfhosted"] = Field(
+    LLM_PROVIDER: Literal["sarvam", "openai", "gemini", "selfhosted"] = Field(default="openai", description="Real-time LLM")
+    LLM_FALLBACK_PROVIDER: Literal["", "sarvam", "openai", "gemini", "selfhosted"] = Field(
         default="", description="Second LLM provider; empty keeps using REALTIME_LLM_FALLBACK_*"
     )
     LLM_REASONING_EFFORT: str = Field(
@@ -67,6 +67,13 @@ class Settings(BaseSettings):
         default="Speak as a warm, friendly young Indian woman on a phone call, in natural Hinglish with an Indian accent. "
                 "Pronounce Roman-script Hindi words as Hindi.",
         description="How the voice should sound (gpt-4o-mini-tts only)",
+    )
+    GEMINI_API_KEY: str = Field(default="", description="Google AI Studio key, used when a provider is set to gemini")
+    GEMINI_BASE_URL: str = Field(default="https://generativelanguage.googleapis.com/v1beta/openai",
+                                 description="Gemini's OpenAI-compatible address")
+    GEMINI_MODEL: str = Field(default="gemini-3.5-flash-lite", description="Model when a provider is set to gemini")
+    GEMINI_REASONING_EFFORT: str = Field(
+        default="minimal", description="Gemini's own effort setting (it rejects 'none'); empty sends none at all"
     )
     SELFHOSTED_LLM_BASE_URL: str = Field(default="", description="OpenAI-compatible server, e.g. vLLM or SGLang")
     SELFHOSTED_LLM_API_KEY: str = Field(default="", description="Key for the self-hosted server, if it needs one")

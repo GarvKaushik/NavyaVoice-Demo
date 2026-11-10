@@ -161,6 +161,22 @@ def test_reasoning_models_get_effort_and_no_temperature(monkeypatch):
     assert LLMClient([ep])._body(ep, [], None, 0.3, 160, True, None)["reasoning_effort"] == "low"
 
 
+def test_gemini_uses_its_own_key_and_google_address(monkeypatch):
+    _set(monkeypatch, LLM_REASONING_EFFORT="none", GEMINI_REASONING_EFFORT="minimal", GEMINI_API_KEY="g-key",
+         GEMINI_MODEL="gemini-3.5-flash-lite", GEMINI_BASE_URL="https://generativelanguage.googleapis.com/v1beta/openai")
+    ep = build_endpoint("gemini", "primary")
+    assert (ep.provider, ep.model, ep.api_key) == ("gemini", "gemini-3.5-flash-lite", "g-key")
+    assert "generativelanguage.googleapis.com" in ep.base_url
+    body = LLMClient([ep])._body(ep, [], None, 0.3, 160, True, None)
+    assert body["max_tokens"] == 160 and body["reasoning_effort"] == "minimal"  # OpenAI's "none" doesn't leak to Gemini
+    _set(monkeypatch, GEMINI_REASONING_EFFORT="")
+    assert "reasoning_effort" not in LLMClient([ep])._body(ep, [], None, 0.3, 160, True, None)
+    _set(monkeypatch, GEMINI_API_KEY="")
+    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+        build_endpoint("gemini", "primary")
+    assert Settings(LLM_PROVIDER="gemini", _env_file=None).LLM_PROVIDER == "gemini"
+
+
 def test_selfhosted_is_the_same_client_with_another_url(monkeypatch):
     _set(monkeypatch, LLM_REASONING_EFFORT="", SELFHOSTED_LLM_API_KEY="", SELFHOSTED_LLM_BASE_URL="http://gpu:8000/v1", SELFHOSTED_LLM_MODEL="sarvam-30b")
     ep = build_endpoint("selfhosted", "primary")

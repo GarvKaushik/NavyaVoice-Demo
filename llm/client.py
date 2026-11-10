@@ -139,6 +139,10 @@ def build_endpoint(provider: str, name: str) -> LLMEndpoint:
         if not s.OPENAI_API_KEY:
             raise ValueError("LLM provider is openai but OPENAI_API_KEY is not set")
         return LLMEndpoint(name, s.OPENAI_BASE_URL, s.OPENAI_API_KEY, s.OPENAI_MODEL, {}, provider)
+    if provider == "gemini":
+        if not s.GEMINI_API_KEY:
+            raise ValueError("LLM provider is gemini but GEMINI_API_KEY is not set")
+        return LLMEndpoint(name, s.GEMINI_BASE_URL, s.GEMINI_API_KEY, s.GEMINI_MODEL, {}, provider)
     if provider == "selfhosted":
         if not (s.SELFHOSTED_LLM_BASE_URL and s.SELFHOSTED_LLM_MODEL):
             raise ValueError("LLM provider is selfhosted but SELFHOSTED_LLM_BASE_URL or SELFHOSTED_LLM_MODEL is not set")
@@ -234,9 +238,10 @@ class LLMClient:
         """Differences between OpenAI-compatible servers. Sarvam requests are left exactly as they were."""
         if ep.provider == "sarvam":
             return
-        effort = get_settings().LLM_REASONING_EFFORT
+        s = get_settings()
+        effort = s.GEMINI_REASONING_EFFORT if ep.provider == "gemini" else s.LLM_REASONING_EFFORT
         body.pop("reasoning_effort", None)
-        if ep.provider == "selfhosted":
+        if ep.provider in ("gemini", "selfhosted"):  # plain OpenAI-compatible servers: max_tokens, effort only if set
             if effort:
                 body["reasoning_effort"] = effort
             return

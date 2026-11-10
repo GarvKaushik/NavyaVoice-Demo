@@ -64,7 +64,7 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 | --- | --- |
 | `ENVIRONMENT` | `development` |
 | `AUTH_SECRET` | a generated secret (signs website logins) |
-| `LLM_PROVIDER`, `OPENAI_API_KEY` | `openai` and your key (or `selfhosted` with the `SELFHOSTED_LLM_*` settings) |
+| `LLM_PROVIDER`, `OPENAI_API_KEY` | `openai` and your key; or `gemini` with `GEMINI_API_KEY` (and optionally `GEMINI_MODEL`); or `selfhosted` with the `SELFHOSTED_LLM_*` settings. Switching is this one line, then restart the worker and API |
 | `SPEECH_SERVER_TOKEN` | a generated secret, the **same value** on the pipeline and on every STT/TTS service |
 | `HF_TOKEN` | your Hugging Face read token (only where STT runs) |
 | `STT_PROVIDER` | `indicconformer` |
