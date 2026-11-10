@@ -21,6 +21,7 @@ PRODUCT_LEXICON: Dict[str, str] = {
     r"\bCRM-PRO\b": "C R M Pro",
     r"\bCRM-STARTER\b": "C R M Starter",
     r"\bNavyaNexus\b": "Navya Nexus",
+    r"\b[Nn]exus\b": "नेक्सस",  # the voice misreads the Roman spelling
 }
 
 
@@ -90,7 +91,21 @@ class HinglishNormalizer:
 
     @classmethod
     def normalize_times(cls, text: str) -> str:
-        """Converts '5 baje', '5:30 PM' or '17:00' to spoken Hindi time."""
+        """Converts '5 baje', '5:30 baje', '5:30 PM' or '17:00' to spoken Hindi time."""
+        def _baje(m: re.Match) -> str:
+            # The part of day is already in the sentence ("kal shaam 5:30 baje")
+            hour, minute = int(m.group(1)), int(m.group(2))
+            if hour > 23 or minute > 59:
+                return m.group(0)
+            h12 = hour % 12 or 12
+            if minute == 30:
+                return f"saadhe {cls.int_to_hindi_phonetic(h12)} baje"
+            if minute == 0:
+                return f"{cls.int_to_hindi_phonetic(h12)} baje"
+            return f"{cls.int_to_hindi_phonetic(h12)} bajkar {cls.int_to_hindi_phonetic(minute)} minute"
+
+        text = re.sub(r"\b(\d{1,2}):(\d{2})\s*baje\b", _baje, text, flags=re.IGNORECASE)
+
         def _clock(m: re.Match) -> str:
             hour, minute = int(m.group(1)), int(m.group(2) or 0)
             suffix = (m.group(3) or "").lower()

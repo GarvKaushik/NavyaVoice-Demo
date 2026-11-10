@@ -9,13 +9,14 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "livekit-client": "2.15.4",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.1.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
-    "@tailwindcss/vite": "^4.1.0",
     "@vitejs/plugin-react": "^4.4.0",
     "tailwindcss": "^4.1.0",
     "typescript": "^5.8.0",

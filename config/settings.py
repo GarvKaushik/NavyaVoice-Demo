@@ -7,7 +7,7 @@ environment variables and an optional .env file.
 import json
 from datetime import date
 from functools import lru_cache
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -34,6 +34,97 @@ class Settings(BaseSettings):
         default="support@navyanexus.ai",
         description="Published complaint channel spoken on request and shown in API",
     )
+
+    # --------------------------------------------------------------------------
+    # Provider selection. The default build needs only OpenAI: local STT, OpenAI LLM and OpenAI speech.
+    # --------------------------------------------------------------------------
+    STT_PROVIDER: Literal["sarvam", "indicconformer", "whisper_hinglish"] = Field(
+        default="indicconformer", description="Live speech-to-text; the local engines run on the STT server"
+    )
+    LLM_PROVIDER: Literal["sarvam", "openai", "selfhosted"] = Field(default="openai", description="Real-time LLM")
+    LLM_FALLBACK_PROVIDER: Literal["", "sarvam", "openai", "selfhosted"] = Field(
+        default="", description="Second LLM provider; empty keeps using REALTIME_LLM_FALLBACK_*"
+    )
+    LLM_REASONING_EFFORT: str = Field(
+        default="", description="For reasoning models only; empty picks the lowest effort the model supports"
+    )
+    TTS_PROVIDER: Literal["piper", "sarvam", "openai", "server"] = Field(
+        default="piper", description="Live TTS; piper runs in this process, server is the separate TTS service"
+    )
+    PIPER_VOICE: str = Field(default="hi_IN-priyamvada-medium", description="Piper voice; check its licence before commercial use")
+    PIPER_MODEL_DIR: str = Field(default="models/piper", description="Where Piper voices are downloaded")
+    PIPER_SAMPLE_RATE: int = Field(default=22050, description="Output rate of medium-quality Piper voices")
+    PIPER_LENGTH_SCALE: float = Field(default=0.85, description="Speech pace; below 1.0 is faster")
+
+    OPENAI_API_KEY: str = Field(default="", description="Used when a provider is set to openai")
+    OPENAI_BASE_URL: str = Field(default="https://api.openai.com/v1", description="OpenAI API base URL")
+    OPENAI_MODEL: str = Field(default="gpt-5.6-luna", description="Model when a provider is set to openai")
+    OPENAI_TTS_MODEL: str = Field(default="gpt-4o-mini-tts", description="OpenAI speech model")
+    OPENAI_TTS_VOICE: str = Field(default="marin", description="OpenAI voice")
+    OPENAI_TTS_SAMPLE_RATE: int = Field(default=24000, description="OpenAI PCM output rate")
+    OPENAI_TTS_SPEED: float = Field(default=1.2, description="Speech speed; 1.0 sounds slow for a sales call")
+    OPENAI_TTS_INSTRUCTIONS: str = Field(
+        default="Speak as a warm, friendly young Indian woman on a phone call, in natural Hinglish with an Indian accent. "
+                "Pronounce Roman-script Hindi words as Hindi.",
+        description="How the voice should sound (gpt-4o-mini-tts only)",
+    )
+    SELFHOSTED_LLM_BASE_URL: str = Field(default="", description="OpenAI-compatible server, e.g. vLLM or SGLang")
+    SELFHOSTED_LLM_API_KEY: str = Field(default="", description="Key for the self-hosted server, if it needs one")
+    SELFHOSTED_LLM_MODEL: str = Field(default="", description="Model served by the self-hosted server")
+
+    # --------------------------------------------------------------------------
+    # Local STT server
+    # --------------------------------------------------------------------------
+    STT_SERVER_URL: str = Field(default="ws://127.0.0.1:8765/v1/stt", description="Only its URL changes on a GPU box")
+    STT_SERVER_TIMEOUT_SECONDS: float = Field(default=25.0, description="Wait for one utterance before falling back (CPU decoding is slow)")
+    STT_SERVER_MAX_QUEUE: int = Field(default=2, description="Utterances waiting before the server reports busy")
+    STT_FALLBACK_TO_SARVAM: bool = Field(default=False, description="Use Sarvam on a server failure, when a key is set")
+    STT_PARTIALS_ENABLED: bool = Field(default=False, description="Rolling partial results; expensive on CPU")
+    STT_WHISPER_MODEL_PATH: str = Field(default="models/whisper-hinglish-apex-ct2", description="Converted model folder")
+    STT_WHISPER_DEVICE: str = Field(default="cpu", description="cpu, or cuda on a GPU box")
+    STT_WHISPER_COMPUTE_TYPE: str = Field(default="int8", description="CTranslate2 compute type")
+    STT_WHISPER_THREADS: int = Field(default=6, description="CPU threads for decoding")
+    STT_INDICCONFORMER_MODEL: str = Field(default="ai4bharat/indic-conformer-600m-multilingual", description="Gated model")
+    STT_INDICCONFORMER_PATH: str = Field(default="models/indicconformer", description="Downloaded model folder")
+    STT_INDICCONFORMER_DEVICE: str = Field(default="cpu", description="cpu, or cuda on a GPU box (needs onnxruntime-gpu)")
+    STT_SERVER_STREAMING: bool = Field(
+        default=True, description="One connection per call with audio sent as it arrives; off sends each utterance at the end"
+    )
+    HF_TOKEN: str = Field(default="", description="Hugging Face token for gated models")
+
+    # --------------------------------------------------------------------------
+    # Speech services (STT and TTS servers). Both sides read SPEECH_SERVER_TOKEN.
+    # --------------------------------------------------------------------------
+    SPEECH_SERVER_TOKEN: str = Field(
+        default="", description="Shared secret the STT and TTS servers require; empty turns the check off (local only)"
+    )
+    TTS_SERVER_URL: str = Field(default="ws://127.0.0.1:8766/v1/tts", description="TTS service the pipeline speaks through")
+    TTS_SERVER_SAMPLE_RATE: int = Field(default=8000, description="Rate the TTS service sends audio at (telephony)")
+    TTS_SERVER_VOICE: str = Field(
+        default="maya-ahana", description="Name cached audio is filed under; change it when the service's voice changes"
+    )
+    TTS_SERVER_TIMEOUT_SECONDS: float = Field(
+        default=10.0, description="Wait for the next piece of audio, including a switch to the fallback voice"
+    )
+    TTS_FALLBACK_TO_SARVAM: bool = Field(default=False, description="Speak through Bulbul when the TTS service fails")
+    TTS_ENGINE: Literal["maya", "svara", "piper"] = Field(default="maya", description="Voice the TTS service uses")
+    TTS_FALLBACK_ENGINE: Literal["", "maya", "svara", "piper"] = Field(
+        default="svara", description="Voice the TTS service switches to when the main one fails; loaded on first use"
+    )
+    TTS_ENGINE_FIRST_AUDIO_TIMEOUT_SECONDS: float = Field(
+        default=5.0, description="Wait for the main voice's first audio before switching to the fallback"
+    )
+    TTS_PRELOAD: bool = Field(default=True, description="Load the main voice when the TTS service starts")
+    TTS_MAYA_MODEL: str = Field(default="maya-research/maya2-native", description="Maya checkpoint")
+    TTS_MAYA_VOICE: str = Field(default="Ahana", description="Built-in Maya voice")
+    TTS_MAYA_LANGUAGE: str = Field(default="hi", description="Language code passed to Maya")
+    TTS_MAYA_DEVANAGARI: bool = Field(default=True, description="Convert Roman Hinglish to Devanagari before Maya")
+    TTS_MAYA_SEATS: int = Field(default=1, description="Sentences Maya generates at once; more seats use more GPU memory")
+    TTS_SVARA_GGUF: str = Field(default="models/svara/svara-tts-v1-Q3_K_M.gguf", description="Svara model file")
+    TTS_SVARA_GGUF_REPO: str = Field(default="", description="Hugging Face repo to download the Svara file from, if missing")
+    TTS_SVARA_GPU_LAYERS: int = Field(default=-1, description="Layers on the GPU (-1 all, 0 for CPU only)")
+    TTS_SVARA_THREADS: int = Field(default=6, description="CPU threads for Svara")
+    TTS_SVARA_SPEED: float = Field(default=1.1, description="Speech speed-up without changing pitch")
 
     # --------------------------------------------------------------------------
     # Telephony Configuration (Plivo & Indian Carrier Standards)
@@ -329,6 +420,23 @@ class Settings(BaseSettings):
     WEB_CONSOLE_ENABLED: bool = Field(default=True, description="Expose the browser test console endpoints")
 
     # --------------------------------------------------------------------------
+    # Portal: login, dialer and limits
+    # --------------------------------------------------------------------------
+    AUTH_SECRET: str = Field(default="", description="Signs login sessions; required in production")
+    AUTH_SESSION_HOURS: int = Field(default=12, description="How long a portal login lasts")
+    LIVEKIT_PUBLIC_URL: str = Field(default="", description="LiveKit URL browsers connect to (defaults to LIVEKIT_URL)")
+    DIALER_MAX_CONCURRENT_CALLS: int = Field(default=100, description="Calls the platform runs at once, across all clients")
+    DIALER_POLL_SECONDS: float = Field(default=1.0, description="How often the dialer looks for due jobs")
+    DEFAULT_CLIENT_MAX_CONCURRENT_CALLS: int = Field(default=5, description="Concurrent call cap for a new client")
+    TEST_CALL_MONTHLY_MINUTES: int = Field(default=30, description="Free browser test minutes per client per month")
+    KNOWLEDGE_MAX_UPLOAD_MB: int = Field(default=5, description="Largest knowledge document accepted")
+    DEMO_CALL_ENABLED: bool = Field(default=True, description="The landing page's 'Talk to the agent' browser call")
+    DEMO_CAMPAIGN_ID: str = Field(default="CAMP-REENGAGE-Q4", description="Campaign whose script the demo agent uses")
+    DEMO_MAX_SECONDS: int = Field(default=120, description="A demo call ends politely after this long")
+    DEMO_CALLS_PER_HOUR: int = Field(default=3, description="Demo calls one visitor (IP address) can start per hour")
+    DEMO_MAX_CONCURRENT: int = Field(default=3, description="Demo calls running at once, across all visitors")
+
+    # --------------------------------------------------------------------------
     # Observability
     # --------------------------------------------------------------------------
     OTEL_EXPORTER_OTLP_ENDPOINT: str = Field(default="", description="OTLP/HTTP endpoint (Langfuse, Tempo, collector)")
@@ -347,6 +455,20 @@ class Settings(BaseSettings):
     # ----------------------------------------------------------------------
     # Derived helpers
     # ----------------------------------------------------------------------
+    @property
+    def tts_model(self) -> str:
+        return {"piper": "piper", "openai": self.OPENAI_TTS_MODEL, "server": "tts-server"}.get(self.TTS_PROVIDER, self.BULBUL_TTS_MODEL)
+
+    @property
+    def tts_voice(self) -> str:
+        return {"piper": self.PIPER_VOICE, "openai": self.OPENAI_TTS_VOICE,
+                "server": self.TTS_SERVER_VOICE}.get(self.TTS_PROVIDER, self.BULBUL_TTS_VOICE_ID)
+
+    @property
+    def tts_sample_rate(self) -> int:
+        return {"piper": self.PIPER_SAMPLE_RATE, "openai": self.OPENAI_TTS_SAMPLE_RATE,
+                "server": self.TTS_SERVER_SAMPLE_RATE}.get(self.TTS_PROVIDER, self.BULBUL_TTS_SAMPLE_RATE)
+
     @property
     def is_production(self) -> bool:
         return self.ENVIRONMENT.lower() == "production"

@@ -1,4 +1,4 @@
-"""Renders every scripted phrase with Bulbul once and stores it in the phrase cache.
+"""Renders every scripted phrase with the selected TTS provider once and stores it in the phrase cache.
 
     python -m speech.prerender            # render missing phrases
     python -m speech.prerender --force    # re-render all (after changing voice, pitch, pace or text)
@@ -11,7 +11,8 @@ import os
 import sys
 import time
 
-from speech.bulbul_tts import BulbulTTSClient, pcm_to_wav
+from speech.bulbul_tts import pcm_to_wav
+from speech.openai_tts import create_tts_client
 from speech.phrase_cache import PreRenderedPhraseCache
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -20,9 +21,9 @@ if hasattr(sys.stdout, "reconfigure"):
 
 async def main(force: bool, wav_dir: str) -> int:
     cache = PreRenderedPhraseCache()
-    tts = BulbulTTSClient()
+    tts = create_tts_client()
     if not tts.configured:
-        print("SARVAM_API_KEY is not set")
+        print("The API key for the selected TTS provider is not set")
         return 1
     print(f"voice={tts.voice_id} model={tts.model} rate={tts.sample_rate} Hz -> {cache.cache_dir}")
     failures = 0

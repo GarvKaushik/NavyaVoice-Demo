@@ -3,7 +3,8 @@
 Handles:
 - Immediate DND & opt-out lookups
 - Single-active-call-per-number distributed locks
-- Campaign CPS (Calls Per Second) token bucket pacing
+- Platform-wide CPS (Calls Per Second) pacing
+- Login attempt counters
 - Active call counts and circuit breakers
 """
 
@@ -41,6 +42,7 @@ class RedisService:
                     encoding="utf-8",
                     decode_responses=True,
                     socket_timeout=2.0,
+                    socket_connect_timeout=0.5,  # a stopped local server must not hold up a call
                 )
                 await self._client.ping()
             except Exception as e:
@@ -55,10 +57,10 @@ class RedisService:
     # --------------------------------------------------------------------------
     # DND & Opt-Out Immediate Filtering
     # --------------------------------------------------------------------------
-    async def is_dnd_or_opted_out(self, phone_number: str) -> bool:
-        """Check whether a phone number is registered on DND or opted out."""
+    async def is_dnd_or_opted_out(self, phone_number: str, client_id: str) -> bool:
+        """Check whether a phone number opted out of this client's calls."""
         normalized_phone = phone_number.strip().replace(" ", "").replace("-", "")
-        key = f"dnd:optout:{normalized_phone}"
+        key = f"dnd:optout:{client_id}:{normalized_phone}"
 
         client = await self.get_client()
         if client:
@@ -71,10 +73,10 @@ class RedisService:
         # Fallback in-memory
         return self._mock_store.get(key) is not None
 
-    async def mark_opted_out(self, phone_number: str, reason: str = "customer_request") -> bool:
-        """Immediately record opt-out status across all workers and dialers."""
+    async def mark_opted_out(self, phone_number: str, client_id: str, reason: str = "customer_request") -> bool:
+        """Immediately record a client's opt-out across all workers and dialers."""
         normalized_phone = phone_number.strip().replace(" ", "").replace("-", "")
-        key = f"dnd:optout:{normalized_phone}"
+        key = f"dnd:optout:{client_id}:{normalized_phone}"
         value = f"opted_out:{int(time.time())}:{reason}"
 
         client = await self.get_client()
@@ -142,13 +144,13 @@ class RedisService:
         return False
 
     # --------------------------------------------------------------------------
-    # Campaign Calls-Per-Second (CPS) Token Bucket Pacing
+    # Platform-Wide Calls-Per-Second (CPS) Pacing
     # --------------------------------------------------------------------------
-    async def check_and_consume_cps_token(self, campaign_id: str, max_cps: Optional[int] = None) -> bool:
-        """Enforces carrier-level CPS limits using a 1-second sliding window."""
+    async def check_and_consume_cps_token(self, max_cps: Optional[int] = None) -> bool:
+        """Enforces the carrier CPS limit, which is shared by every client, in 1-second windows."""
         limit = max_cps or settings.PLIVO_MAX_CALLS_PER_SECOND
         current_second = int(time.time())
-        key = f"pacing:cps:{campaign_id}:{current_second}"
+        key = f"pacing:cps:{current_second}"
 
         client = await self.get_client()
         if client:
@@ -165,6 +167,41 @@ class RedisService:
         self._mock_store[key] = current_count
         return current_count <= limit
 
+
+    # --------------------------------------------------------------------------
+    # Login attempt counters
+    # --------------------------------------------------------------------------
+    async def get_counter(self, key: str) -> int:
+        client = await self.get_client()
+        if client:
+            try:
+                return int(await client.get(key) or 0)
+            except Exception as e:
+                logger.error(f"Redis counter read error: {e}")
+        entry = self._mock_locks.get(key)
+        return entry["count"] if entry and entry["expires"] > time.time() else 0
+
+    async def incr_counter(self, key: str, ttl_seconds: int) -> None:
+        client = await self.get_client()
+        if client:
+            try:
+                if await client.incr(key) == 1:
+                    await client.expire(key, ttl_seconds)
+                return
+            except Exception as e:
+                logger.error(f"Redis counter write error: {e}")
+        count = await self.get_counter(key)
+        self._mock_locks[key] = {"count": count + 1, "expires": time.time() + ttl_seconds}
+
+    async def clear_counter(self, key: str) -> None:
+        client = await self.get_client()
+        if client:
+            try:
+                await client.delete(key)
+                return
+            except Exception as e:
+                logger.error(f"Redis counter delete error: {e}")
+        self._mock_locks.pop(key, None)
 
     # --------------------------------------------------------------------------
     # Human sales desk availability for warm transfers

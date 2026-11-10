@@ -2,7 +2,7 @@
 
 1. Calling window in the lead's own time zone (configure after counsel confirms the window).
 2. DND / opt-out scrub: Redis cache, the permanent Postgres DND registry, and DLT scrub freshness.
-3. 140-series caller ID for promotional calls, 160-series for service/transactional.
+3. The client's assigned caller ID (outside production, the configured 140/160-series numbers).
 4. Attempt cap per lead.
 """
 
@@ -40,6 +40,7 @@ class ComplianceManager:
         self,
         phone_number: str,
         attempt_count: int,
+        client_id: str,
         is_promotional: bool = True,
         timezone: Optional[str] = None,
         skip_window_check: bool = False,
@@ -53,25 +54,28 @@ class ComplianceManager:
         if attempt_count >= settings.MAX_DIAL_ATTEMPTS_PER_LEAD:
             return False, f"Max outreach attempt limit ({settings.MAX_DIAL_ATTEMPTS_PER_LEAD}) reached"
 
-        if await self.redis_service.is_dnd_or_opted_out(phone_number):
-            return False, "Lead is registered on DND or previously opted out"
+        if await self.redis_service.is_dnd_or_opted_out(phone_number, client_id):
+            return False, "Lead previously opted out of this client's calls"
 
-        db_check = await self._database_check(phone_number, is_promotional)
+        db_check = await self._database_check(phone_number, client_id, is_promotional)
         if db_check is not None:
             return False, db_check
         return True, "Eligible to dial"
 
-    async def _database_check(self, phone_number: str, is_promotional: bool) -> Optional[str]:
-        """Permanent DND registry, consent on file, and DLT scrub freshness."""
+    async def _database_check(self, phone_number: str, client_id: str, is_promotional: bool) -> Optional[str]:
+        """Client and national DND entries, consent on file, and DLT scrub freshness."""
         try:
             from sqlalchemy import select
-            from database.models import DNDEntry, Lead, utcnow
+            from database.models import DNDEntry, GLOBAL_DND_CLIENT, Lead, utcnow
             from database.session import get_read_sessionmaker
 
             async with get_read_sessionmaker()() as db:
-                if await db.get(DNDEntry, phone_number):
-                    return "Number is in the permanent DND registry"
-                lead = (await db.execute(select(Lead).where(Lead.phone_number == phone_number))).scalar()
+                if await db.get(DNDEntry, (client_id, phone_number)):
+                    return "Number opted out of this client's calls"
+                if await db.get(DNDEntry, (GLOBAL_DND_CLIENT, phone_number)):
+                    return "Number is on the national DND registry"
+                lead = (await db.execute(select(Lead).where(Lead.client_id == client_id,
+                                                            Lead.phone_number == phone_number))).scalar()
                 if lead is None:
                     return None
                 if lead.is_dnd or lead.dlt_registered_dnd:

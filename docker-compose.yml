@@ -58,6 +58,7 @@ services:
   campaign-api:
     build: .
     container_name: voiceagent-api
+    env_file: .env
     ports:
       - "8000:8000"
     environment:
@@ -74,11 +75,32 @@ services:
     command: ["uvicorn", "campaign.api:app", "--host", "0.0.0.0", "--port", "8000"]
 
   # ----------------------------------------------------------------------------
+  # Dialer, CRM webhooks, post-call summaries and recording retention
+  # ----------------------------------------------------------------------------
+  background:
+    build: .
+    container_name: voiceagent-background
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgrespassword@postgres:5432/voiceagent
+      - REDIS_URL=redis://redis:6379/0
+      - LIVEKIT_URL=ws://livekit:7880
+      - LIVEKIT_API_KEY=devkey
+      - LIVEKIT_API_SECRET=secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["python", "-m", "campaign.background"]
+
+  # ----------------------------------------------------------------------------
   # LiveKit Agents Worker (Scale horizontally as needed)
   # ----------------------------------------------------------------------------
   agent-worker:
     build: .
     container_name: voiceagent-worker
+    env_file: .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgrespassword@postgres:5432/voiceagent
       - REDIS_URL=redis://redis:6379/0

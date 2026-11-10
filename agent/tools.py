@@ -8,6 +8,7 @@ call's AuthorizationContext so the OutputGuard allows exactly those values.
 
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -15,9 +16,10 @@ from typing import Any, Dict, List, Optional
 
 import pytz
 
-from agent.callback_time import parse_callback_time, speak_time
+from agent.callback_time import _WORD_NUM, _num, parse_callback_time, speak_time
 from agent.knowledge import CampaignKnowledge
 from config.settings import get_settings
+from database.models import DEFAULT_CLIENT_ID
 from guardrails.authorization import AuthorizationContext
 from observability import metrics as m
 from services.redis_service import get_redis_service
@@ -34,6 +36,7 @@ class CallIdentity:
     customer_name: str
     segment: Optional[str] = None
     timezone: str = "Asia/Kolkata"
+    client_id: str = DEFAULT_CLIENT_ID
 
 
 @dataclass
@@ -44,12 +47,15 @@ class PendingAction:
     detail: Dict[str, Any] = field(default_factory=dict)
 
 
+# A completed action the customer has been told about; nothing later in the call may overwrite it
+CONFIRMED_OUTCOMES = {"demo_booked", "payment_link_sent"}
+
 TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {"type": "function", "function": {
         "name": "get_price",
         "description": "Active catalog price and approved phrasing for a product plan. Call before saying any price.",
         "parameters": {"type": "object", "properties": {
-            "sku": {"type": "string", "description": "Product SKU, e.g. CRM-PRO or CRM-STARTER"},
+            "sku": {"type": "string", "description": "Product SKU from MAIN PRODUCT or OTHER PLANS"},
             "plan": {"type": "string", "description": "Monthly or Annual"}},
             "required": ["sku"]}}},
     {"type": "function", "function": {
@@ -110,6 +116,23 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
 ]
 
 
+SEARCH_KNOWLEDGE_SCHEMA: Dict[str, Any] = {"type": "function", "function": {
+    "name": "search_knowledge",
+    "description": "Approved answers for questions no other tool covers. Use only what it returns.",
+    "parameters": {"type": "object", "properties": {
+        "query": {"type": "string", "description": "The customer's question, in a few words"}},
+        "required": ["query"]}}}
+
+
+def tool_schemas_for(knowledge: CampaignKnowledge) -> List[Dict[str, Any]]:
+    """The knowledge tool is sent only to campaigns that have approved documents."""
+    return TOOL_SCHEMAS + [SEARCH_KNOWLEDGE_SCHEMA] if knowledge.faqs else TOOL_SCHEMAS
+
+
+def _words(text: str) -> set:
+    return {w for w in re.findall(r"\w+", (text or "").lower()) if len(w) > 2}
+
+
 class CallTools:
     """Server-side tools accessible by the real-time LLM during a call."""
 
@@ -121,9 +144,17 @@ class CallTools:
         self.settings = get_settings()
         self.pending_action: Optional[PendingAction] = None
         self.outcome: Optional[str] = None
+        self.last_confirmation: Optional[str] = None  # approved line for the last completed action
+        self.price_allowed: bool = True  # the dialogue engine holds this until the customer asks
+        self.link_consented: bool = True  # the dialogue engine sets these two from each customer turn
+        self.opt_out_allowed: bool = True
+        self.end_call_allowed: bool = True  # off while the agent still has a question to ask on this turn
+        self.amount_heard: bool = True  # the dialogue engine holds this until a price or offer is given
+        self.offered_slot_phrases: Dict[str, str] = {}  # the slots last offered, kept for later turns
         self.tool_log: List[Dict[str, Any]] = []
         self._offered_slots: Dict[str, datetime] = {}
         self._presented_offers: Dict[tuple, Any] = {}  # offers the customer has actually heard on this call
+        self._links_sent: set = set()  # a plan's link goes out once per call
 
     # ------------------------------------------------------------------
     async def execute(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -156,6 +187,8 @@ class CallTools:
 
     # ------------------------------------------------------------------
     async def tool_get_price(self, sku: str, plan: str = "Monthly") -> Dict[str, Any]:
+        if not self.price_allowed:
+            return {"ok": False, "error": "the customer has not asked the price; do not mention it, continue the conversation"}
         key = self._resolve_plan(sku, plan)
         if key is None:
             options = [f"{s}/{p}" for s, p in self.knowledge.catalog]
@@ -163,6 +196,7 @@ class CallTools:
         item = self.knowledge.catalog[key]
         per = "per month" if item.billing_period == "monthly" else "per year"
         phrasing = self._approve(f"{item.name} ka price ₹{int(item.price_inr):,} {per} hai.")
+        self.amount_heard = True
         self.auth.authorize_numbers([item.price_inr])
         return {"ok": True, "sku": item.sku, "plan": item.plan, "name": item.name, "price_inr": item.price_inr,
                 "billing_period": item.billing_period, "features": item.features, "approved_phrasing": phrasing}
@@ -191,6 +225,7 @@ class CallTools:
         if offer is None:
             return {"ok": True, "offer": None, "approved_phrasing": "Abhi is plan par koi special offer nahi hai."}
         self._presented_offers[key] = offer
+        self.amount_heard = True
         base = self.knowledge.catalog[key].price_inr
         self.auth.authorize_numbers([offer.discount_percentage, offer.discounted_price_inr, base])
         self.auth.authorize_terms(["discount", "offer"])
@@ -246,14 +281,27 @@ class CallTools:
         self.auth.mark_action(f"policy:{policy.topic}")
         return {"ok": True, "topic": policy.topic, "approved_text": policy.approved_text}
 
+    async def tool_search_knowledge(self, query: str) -> Dict[str, Any]:
+        wanted = _words(query)
+        scored = [(len(wanted & _words(f"{f['question']} {f['answer']}")), f) for f in self.knowledge.faqs]
+        best = [f for score, f in sorted(scored, key=lambda x: -x[0])[:2] if score > 0]
+        if not best:
+            return {"ok": True, "found": False, "say": "You do not have this detail. Offer a senior expert or a callback."}
+        for f in best:
+            self._approve(f["answer"])
+        self.auth.mark_action("search_knowledge")
+        return {"ok": True, "found": True, "approved_text": [f["answer"] for f in best]}
+
     # ------------------------------------------------------------------
     async def tool_list_demo_slots(self) -> Dict[str, Any]:
         tz = pytz.timezone(self.identity.timezone or self.settings.TIMEZONE)
         slots = await self._db_demo_slots(tz) or self._generated_demo_slots(tz)
         out = []
+        self.offered_slot_phrases = {}
         for slot_id, start in slots[:3]:
             self._offered_slots[slot_id] = start
             phrase = speak_time(start)
+            self.offered_slot_phrases[slot_id] = phrase
             out.append({"slot_id": slot_id, "spoken": phrase})
             self._approve(phrase + " " + start.strftime("%d %B %A"))
             self.auth.authorize_numbers([start.hour % 12 or 12, start.day])
@@ -268,7 +316,7 @@ class CallTools:
 
             async with get_read_sessionmaker()() as db:
                 rows = (await db.execute(select(DemoSlot).where(
-                    DemoSlot.is_active.is_(True), DemoSlot.starts_at > datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1),
+                    DemoSlot.client_id == self.identity.client_id, DemoSlot.is_active.is_(True), DemoSlot.starts_at > datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1),
                     DemoSlot.booked_count < DemoSlot.capacity).order_by(DemoSlot.starts_at).limit(3))).scalars().all()
             return [(str(r.id), pytz.utc.localize(r.starts_at).astimezone(tz)) for r in rows]
         except Exception:
@@ -288,10 +336,39 @@ class CallTools:
             day = day + timedelta(days=1)
         return slots
 
+    def _resolve_slot(self, value: Any) -> Optional[str]:
+        """The offered slot the model means, whether it sends "3", "slot_id 3", "slot_3" or the spoken time."""
+        text = str(value).strip()
+        if text in self._offered_slots:
+            return text
+        bare = re.sub(r"^(slot[_\s-]*(id)?[\s:=_-]*)", "", text, flags=re.IGNORECASE).strip()
+        if bare in self._offered_slots:
+            return bare
+        return next((slot_id for slot_id, spoken in self.offered_slot_phrases.items() if spoken.lower() == text.lower()), None)
+
+    def slot_from_words(self, text: str) -> Optional[str]:
+        """The one offered slot the customer's words point to ("gyarah baje wala", "shaam wala", "pehla"), or None."""
+        t = text.lower()
+        ids = list(self.offered_slot_phrases)
+        for index, words in enumerate((("pehla", "pehle", "first"), ("doosra", "dusra", "second"))):
+            if index < len(ids) and any(re.search(rf"\b{w}\b", t) for w in words):
+                return ids[index]
+        numbers = "|".join(_WORD_NUM)
+        hour = re.search(rf"\b(\d{{1,2}}|{numbers})\s*(baje|bje|wala|wali|o'?clock)\b", t)
+        matches = [(slot_id, self._offered_slots[slot_id]) for slot_id in ids]
+        if hour and _num(hour.group(1)) is not None:
+            matches = [m for m in matches if m[1].hour % 12 == _num(hour.group(1)) % 12]
+        part = next((p for p in ("subah", "dopahar", "shaam") if re.search(rf"\b{p}\b", t)), None)
+        if part:
+            matches = [m for m in matches if {"subah": m[1].hour < 12, "dopahar": 12 <= m[1].hour < 16,
+                                              "shaam": m[1].hour >= 16}[part]]
+        return matches[0][0] if (hour or part) and len(matches) == 1 else None
+
     async def tool_book_demo(self, slot_id: str) -> Dict[str, Any]:
-        start = self._offered_slots.get(str(slot_id))
-        if start is None:
-            return {"ok": False, "error": "unknown slot_id; call list_demo_slots first"}
+        slot_id = self._resolve_slot(slot_id)
+        if slot_id is None:
+            return {"ok": False, "error": "unknown slot_id; use a slot_id from DEMO SLOTS YOU OFFERED or call list_demo_slots"}
+        start = self._offered_slots[slot_id]
         key = f"demo:{self.identity.call_id}:{slot_id}"
         booked = await self._db_book_slot(slot_id, key)
         if booked is False:
@@ -299,7 +376,9 @@ class CallTools:
         self.auth.mark_action("book_demo")
         self.outcome = "demo_booked"
         phrase = self._approve(f"Aapka demo {speak_time(start)} ke liye book ho gaya hai. Details WhatsApp par aa jayengi.")
-        return {"ok": True, "booking_id": key, "approved_phrasing": phrase}
+        self.last_confirmation = phrase
+        return {"ok": True, "booking_id": key, "approved_phrasing": phrase,
+                "next": "Say this line and thank the customer. Do not ask any more questions."}
 
     async def _db_book_slot(self, slot_id: str, key: str) -> Optional[bool]:
         """True booked, False full, None when no slot table (generated slots)."""
@@ -329,9 +408,18 @@ class CallTools:
             return None
 
     async def tool_send_payment_link(self, sku: str, plan: str = "Monthly", channel: str = "whatsapp") -> Dict[str, Any]:
+        if not self.knowledge.payment_links_enabled:
+            return {"ok": False, "error": "payment links are not available; offer a human expert or callback"}
         key = self._resolve_plan(sku, plan)
         if key is None:
             return {"ok": False, "error": "unknown product or plan"}
+        if key in self._links_sent:
+            return {"ok": True, "already_sent": True, "approved_phrasing": self.last_confirmation}
+        if not self.link_consented:
+            return {"ok": False, "error": "the customer has not agreed to a payment link; do not send it. "
+                                          "If it fits, ask: kya main payment link bhej doon?"}
+        if not self.amount_heard:
+            return {"ok": False, "error": "the customer has not heard the amount; call get_price and say it first"}
         channel = "sms" if str(channel).lower() == "sms" else "whatsapp"
         # Price recomputed server-side; never trusted from the LLM. The offer price applies only if the
         # customer heard that offer on this call and it is still valid, so the link matches what was said.
@@ -355,21 +443,25 @@ class CallTools:
         self.auth.mark_action("send_payment_link")
         self.auth.authorize_numbers([amount])
         self.outcome = "payment_link_sent"
+        self._links_sent.add(key)
         where = "WhatsApp" if channel == "whatsapp" else "SMS"
         phrase = self._approve(f"Maine ₹{int(amount):,} ka payment link aapke {where} par bhej diya hai.")
+        self.last_confirmation = phrase
         return {"ok": True, "amount_inr": amount, "channel": channel, "approved_phrasing": phrase,
                 "sandbox": result.get("sandbox", False)}
 
     async def tool_transfer_to_human(self, reason: str = "customer_request") -> Dict[str, Any]:
         tz = pytz.timezone(self.settings.TIMEZONE)
         hour = datetime.now(tz).hour
-        numbers = self.settings.human_transfer_numbers
+        numbers = self.knowledge.transfer_numbers
         staffed = self.settings.HUMAN_TRANSFER_START_HOUR <= hour < self.settings.HUMAN_TRANSFER_END_HOUR
         free = await self.redis.pick_free_human_agent(numbers) if numbers and staffed else None
         if not free:
             when = parse_callback_time("kal subah", tz_name=self.identity.timezone)
             await self._schedule_callback(when, "human_expert_callback")
             self.auth.mark_action("schedule_callback")
+            if self.outcome not in CONFIRMED_OUTCOMES:
+                self.outcome = "manager_callback"
             phrase = self._approve(f"Abhi hamare experts available nahi hain. Main {speak_time(when)} expert se callback karwa deti hoon.")
             return {"ok": False, "transferred": False, "approved_phrasing": phrase}
         self.auth.mark_action("transfer_to_human")
@@ -384,9 +476,10 @@ class CallTools:
             return {"ok": False, "error": "time not understood; ask the customer for a day and time"}
         await self._schedule_callback(moment, "callback")
         self.auth.mark_action("schedule_callback")
-        self.outcome = "callback_scheduled"
+        if self.outcome not in CONFIRMED_OUTCOMES:
+            self.outcome = "callback_scheduled"
         phrase = self._approve(f"Theek hai, main aapko {speak_time(moment)} call karti hoon.")
-        self.pending_action = PendingAction("end_call", "callback_scheduled", {"callback_at": moment.isoformat()})
+        self.pending_action = PendingAction("end_call", self.outcome, {"callback_at": moment.isoformat()})
         return {"ok": True, "callback_at": moment.isoformat(), "approved_phrasing": phrase}
 
     async def _schedule_callback(self, moment: datetime, reason: str) -> None:
@@ -396,13 +489,18 @@ class CallTools:
             from database.session import AsyncSessionLocal
 
             async with AsyncSessionLocal() as db:
-                db.add(DialJob(lead_id=self.identity.lead_id, campaign_id=self.identity.campaign_id,
-                               scheduled_at=moment.astimezone(pytz.utc).replace(tzinfo=None), reason=reason))
+                # An expert returns this one by hand; the AI dialer must not pick it up
+                db.add(DialJob(client_id=self.identity.client_id, lead_id=self.identity.lead_id,
+                               campaign_id=self.identity.campaign_id, reason=reason,
+                               status="manual" if reason == "human_expert_callback" else "queued",
+                               scheduled_at=moment.astimezone(pytz.utc).replace(tzinfo=None)))
                 await db.commit()
         except Exception as e:
             logger.warning(f"Callback job not persisted ({e!r}); recorded on call only")
 
     async def tool_record_opt_out(self) -> Dict[str, Any]:
+        if not self.opt_out_allowed:
+            return {"ok": False, "error": "a short 'nahi' only answers your question and is not an opt-out; continue the call"}
         await record_opt_out(self.identity, channel="voice_tool")
         self.auth.mark_action("record_opt_out")
         self.outcome = "opted_out"
@@ -410,15 +508,17 @@ class CallTools:
         return {"ok": True, "approved_phrasing": "Maine aapka number calling list se hata diya hai."}
 
     async def tool_end_call(self, outcome: str = "completed") -> Dict[str, Any]:
+        if not self.end_call_allowed:
+            return {"ok": False, "error": "do not end the call yet; ask your question and wait for the answer"}
         self.outcome = self.outcome or outcome
         self.pending_action = PendingAction("end_call", self.outcome)
         return {"ok": True, "say": "Short polite goodbye in one sentence."}
 
 
 async def record_opt_out(identity: CallIdentity, channel: str = "voice") -> None:
-    """Writes the opt-out to Redis (all dialers see it immediately) and Postgres (permanent)."""
+    """Writes the client's opt-out to Redis (all dialers see it immediately) and Postgres (permanent)."""
     redis = get_redis_service()
-    await redis.mark_opted_out(identity.phone_number, reason=channel)
+    await redis.mark_opted_out(identity.phone_number, identity.client_id, reason=channel)
     m.record_opt_out()
     try:
         from sqlalchemy import update
@@ -426,15 +526,18 @@ async def record_opt_out(identity: CallIdentity, channel: str = "voice") -> None
         from database.session import AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
-            await db.merge(DNDEntry(phone_number=identity.phone_number, source="opt_out",
+            await db.merge(DNDEntry(client_id=identity.client_id, phone_number=identity.phone_number, source="opt_out",
                                     reason=channel, call_id=identity.call_id))
-            await db.execute(update(Lead).where(Lead.phone_number == identity.phone_number)
+            await db.execute(update(Lead).where(Lead.client_id == identity.client_id,
+                                                Lead.phone_number == identity.phone_number)
                              .values(is_dnd=True, dnd_source="opt_out", status="opted_out"))
             await db.execute(update(DialJob).where(DialJob.lead_id == identity.lead_id, DialJob.status == "queued")
                              .values(status="cancelled", last_error="opted_out"))
-            db.add(ConsentRecord(lead_id=identity.lead_id, phone_number=identity.phone_number, call_id=identity.call_id,
-                                 event="opt_out", consent_source="voice", opted_out=True,
-                                 opt_out_timestamp=utcnow(), opt_out_channel=channel))
+            if await db.get(Lead, identity.lead_id) is not None:  # a number can opt out before it is ever a lead
+                db.add(ConsentRecord(client_id=identity.client_id, lead_id=identity.lead_id,
+                                     phone_number=identity.phone_number, call_id=identity.call_id, event="opt_out",
+                                     consent_source="voice", opted_out=True, opt_out_timestamp=utcnow(),
+                                     opt_out_channel=channel))
             await db.commit()
     except Exception as e:
         logger.error(f"Opt-out Postgres write failed for {identity.phone_number}: {e!r} (Redis entry is permanent)")

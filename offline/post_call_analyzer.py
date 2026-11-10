@@ -1,79 +1,84 @@
 """Offline Intelligence Worker: Post-Call Analysis using Sarvam 105B.
 
-Operates strictly out-of-band:
-1. Generates structured CRM summaries and action items.
-2. Evaluates zero-tolerance compliance rubrics (AI disclosure, immediate opt-out).
-3. Mines customer objections across transcripts to surface new playbook drafts for human approval.
-(Note: Nothing generated here ever reaches a live call without human review.)
+Operates strictly out-of-band, after a call has ended:
+1. Generates a short structured summary and next step for the client's dashboard.
+2. Checks the zero-tolerance compliance items that can be read from the call record.
+(Note: Nothing generated here ever reaches a live call.)
+
+The client-facing conclusion (Ready, Refused, ...) comes from the recorded outcome,
+not from this summary.
 """
 
+import json
 import logging
-from typing import Dict, Any, List, Optional
-from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy import select
+
 from config.settings import get_settings
+from database.models import CallRecord, utcnow
+from database.session import AsyncSessionLocal
+from llm.client import LLMClient, LLMUnavailableError, parse_json_object
 
 logger = logging.getLogger(__name__)
-settings = get_settings()
 
-
-@dataclass
-class QAScorecard:
-    """Zero-tolerance compliance and sales execution scorecard."""
-    call_id: str
-    disclosure_played: bool  # 100% mandatory compliance
-    opt_out_honored: bool     # 100% mandatory compliance
-    no_invented_claims: bool  # 100% mandatory compliance
-    sales_effectiveness_score: int  # Scale 1-5
-    customer_sentiment: str  # 'positive', 'neutral', 'skeptical', 'hostile'
-    detected_objections: List[str]
-    suggested_playbook_update: Optional[str] = None
+SUMMARY_PROMPT = """You summarise one Hinglish sales call for the business that made it. Use only what the transcript says.
+Return ONLY a JSON object:
+{"summary": "2 short English sentences on what happened", "next_step": "one short English sentence, or null",
+ "objections": [short English phrases], "sentiment": one of ["positive","neutral","skeptical","hostile"]}"""
 
 
 class PostCallAnalyzer:
     """Executes offline analysis on completed call transcripts."""
 
-    def __init__(self, model_name: Optional[str] = None):
-        self.model_name = model_name or settings.OFFLINE_LLM_MODEL
+    def __init__(self, llm: Optional[LLMClient] = None):
+        self.llm = llm
+
+    def _client(self) -> LLMClient:
+        if self.llm is None:
+            self.llm = LLMClient.offline()
+        return self.llm
 
     async def analyze_completed_call(
         self,
         call_id: str,
-        transcript_turns: List[Dict[str, str]],
+        transcript_turns: List[Dict[str, Any]],
         final_outcome: str,
+        disclosure_played: bool = False,
     ) -> Dict[str, Any]:
-        """Runs offline summarization and QA grading on call history."""
-        logger.info(f"Running offline Sarvam 105B analysis for Call {call_id}")
-
-        full_transcript = "\n".join([
-            f"{turn.get('speaker', 'Agent')}: {turn.get('text', '')}"
-            for turn in transcript_turns
-        ])
-
-        # Evaluate zero-tolerance compliance items
-        has_disclosure = "record" in full_transcript.lower() and "ai" in full_transcript.lower()
-        opt_out_honored = True
-        if "dnd" in full_transcript.lower() or "mat karo" in full_transcript.lower():
-            # If caller asked for DND, call must have concluded with opt-out
-            opt_out_honored = (final_outcome == "opted_out")
-
-        scorecard = QAScorecard(
-            call_id=call_id,
-            disclosure_played=has_disclosure,
-            opt_out_honored=opt_out_honored,
-            no_invented_claims=True,
-            sales_effectiveness_score=4 if final_outcome in ["payment_link_sent", "demo_booked"] else 3,
-            customer_sentiment="positive" if final_outcome in ["payment_link_sent", "demo_booked"] else "neutral",
-            detected_objections=["price"] if "1499" in full_transcript else [],
-            suggested_playbook_update=None,
-        )
-
-        crm_summary = {
-            "call_id": call_id,
-            "executive_summary": f"Sales outreach call concluded with outcome '{final_outcome}'.",
-            "key_takeaways": "Customer evaluated CRM Pro tier pricing and requested details over WhatsApp.",
-            "compliance_pass": scorecard.disclosure_played and scorecard.opt_out_honored,
-            "scorecard": scorecard.__dict__,
+        """Returns the summary and compliance checks. Raises LLMUnavailableError to retry later."""
+        logger.info(f"Running offline analysis for Call {call_id}")
+        text = "\n".join(f"{t.get('speaker', 'agent')}: {t.get('text', '')}" for t in transcript_turns)
+        reply, _usage = await self._client().complete(
+            [{"role": "system", "content": SUMMARY_PROMPT},
+             {"role": "user", "content": json.dumps({"outcome": final_outcome, "transcript": text}, ensure_ascii=False)}],
+            max_tokens=300, json_mode=True, purpose="post_call",
+            extra_body={"reasoning_effort": None})  # otherwise hidden reasoning uses every token and no text comes back
+        data = parse_json_object(reply) or {}
+        return {
+            "summary": str(data.get("summary") or "No summary available."),
+            "next_step": data.get("next_step"),
+            "objections": [str(o) for o in (data.get("objections") or [])][:5],
+            "sentiment": data.get("sentiment") if data.get("sentiment") in ("positive", "neutral", "skeptical", "hostile") else "neutral",
+            "compliance": {"disclosure_played": bool(disclosure_played)},
         }
 
-        return crm_summary
-
+    async def run_pending(self, limit: int = 10) -> int:
+        """Summarises ended calls that have a conversation. Returns how many were done."""
+        done = 0
+        async with AsyncSessionLocal() as db:
+            rows = (await db.execute(select(CallRecord).where(
+                CallRecord.status == "ended", CallRecord.analyzed_at.is_(None), CallRecord.turn_count > 0,
+                CallRecord.direction == "outbound"
+            ).order_by(CallRecord.start_time).limit(limit).with_for_update(skip_locked=True))).scalars().all()
+            for rec in rows:
+                try:
+                    rec.summary = await self.analyze_completed_call(rec.call_id, rec.transcript or [], rec.outcome,
+                                                                    rec.disclosure_played)
+                except LLMUnavailableError as e:
+                    logger.warning(f"Summary postponed: {e}")
+                    break
+                rec.analyzed_at = utcnow()
+                done += 1
+            await db.commit()
+        return done

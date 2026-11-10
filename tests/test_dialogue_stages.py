@@ -3,9 +3,10 @@
 from datetime import date
 
 from agent.knowledge import seed_knowledge
-from agent.stages import SalesStage, StageManager, extract_signals
+from agent.stages import CallStep, SalesStage, StageManager, extract_signals
 from agent.tools import CallIdentity, CallTools
 from guardrails.authorization import AuthorizationContext
+from config.settings import get_settings
 from observability.metrics import CostCalculator
 
 
@@ -16,11 +17,12 @@ def _apply(sm, text):
 def test_stage_flow_and_backward_moves():
     sm = StageManager()
     assert sm.endpointing_delay_ms == 300
-    _apply(sm, "haan boliye")
-    assert sm.current_stage == SalesStage.DISCOVERY and sm.endpointing_delay_ms == 600
-    _apply(sm, "hum manually excel se karte hain, leads miss ho jaati hain")
-    assert sm.current_stage == SalesStage.NEED_IDENTIFICATION
-    _apply(sm, "haan sahi hai")
+    _apply(sm, "haan Rajesh speaking")
+    assert sm.current_stage == SalesStage.OPENING and sm.step == CallStep.HOW_ARE_YOU
+    _apply(sm, "main theek hoon")
+    assert sm.current_stage == SalesStage.OPENING and sm.step == CallStep.OFFER
+    sm.note_agent_reply("Main NavyaNexus se bol rahi hoon. Kya aap aisa software lena chahenge?")
+    _apply(sm, "haan kya hai yeh")
     assert sm.current_stage == SalesStage.PITCH
     _apply(sm, "thoda mehenga hai")
     assert sm.current_stage == SalesStage.OBJECTION_HANDLING
@@ -28,10 +30,32 @@ def test_stage_flow_and_backward_moves():
     assert sm.current_stage == SalesStage.CLOSE_NEXT_STEP  # second objection on same topic -> next step
 
 
-def test_new_need_during_pitch_returns_to_discovery():
+def test_price_follows_one_explanation_when_nothing_more_is_asked():
     sm = StageManager(SalesStage.PITCH)
-    _apply(sm, "aur hamari team chhoti hai, staff kam hai")
-    assert sm.current_stage == SalesStage.DISCOVERY
+    sm.note_agent_reply("Yeh leads ko khud call karta hai.")
+    sig = extract_signals("achha theek hai")
+    sm.apply(sig)
+    assert sig.wants_price and sm.current_stage == SalesStage.CLOSE_NEXT_STEP
+
+
+def test_a_question_gets_a_second_explanation_then_the_price():
+    sm = StageManager(SalesStage.PITCH)
+    sm.note_agent_reply("Yeh leads ko khud call karta hai.")
+    sig = extract_signals("aur kya kya karta hai")
+    sm.apply(sig)
+    assert not sig.wants_price and sm.current_stage == SalesStage.PITCH
+    sm.note_agent_reply("Yeh follow-up reminders bhi deta hai.")
+    sig = extract_signals("aur kya kya karta hai")
+    sm.apply(sig)
+    assert sig.wants_price and sm.current_stage == SalesStage.CLOSE_NEXT_STEP
+
+
+def test_a_no_does_not_get_the_price():
+    sm = StageManager(SalesStage.PITCH)
+    sm.note_agent_reply("Yeh leads ko khud call karta hai.")
+    sig = extract_signals("nahi")
+    sm.apply(sig)
+    assert not sig.wants_price and sm.current_stage == SalesStage.PITCH
 
 
 def test_small_talk_bridging():
@@ -74,7 +98,8 @@ async def test_payment_link_charges_what_the_customer_heard():
     assert link["amount_inr"] == 1199.0
 
 
-def test_cost_calculator_pulse_accounting():
+def test_cost_calculator_pulse_accounting(monkeypatch):
+    monkeypatch.setattr(get_settings(), "TTS_PROVIDER", "sarvam")  # local speech has no per-character cost
     cost = CostCalculator.compute_call_cost(duration_seconds=65, stt_audio_seconds=40.0, tts_character_count=350,
                                             llm_input_tokens=12000, llm_cached_tokens=8000, llm_output_tokens=300,
                                             on=date(2026, 12, 1))

@@ -7,6 +7,10 @@ pydantic>=2.8.0
 pydantic-settings>=2.4.0
 python-dotenv>=1.0.1
 httpx>=0.27.0
+python-multipart>=0.0.9   # knowledge document upload
+pyjwt>=2.8.0              # portal login sessions
+pypdf>=4.0.0              # knowledge documents in PDF
+boto3>=1.34.0             # call recording links and retention
 
 # LiveKit Agents (self-hosted server + SIP), Sarvam STT/TTS, Silero VAD
 livekit>=1.0.0

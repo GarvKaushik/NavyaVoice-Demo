@@ -26,8 +26,8 @@ RETRY_DELAYS = {
     "no_response": timedelta(hours=3),
 }
 FINAL_OUTCOMES = {"opted_out", "wrong_person", "abusive", "complaint", "not_interested", "invalid_number"}
-CRM_OUTCOMES = {"interested", "payment_link_sent", "demo_booked", "transferred", "not_interested", "opted_out",
-                "callback_scheduled"}
+CRM_OUTCOMES = {"interested", "payment_link_sent", "demo_booked", "transferred", "manager_callback", "not_interested",
+                "opted_out", "callback_scheduled"}
 
 
 class CallRecorder:
@@ -69,7 +69,7 @@ class CallRecorder:
         asyncio.create_task(self._write_disclosure())
 
     # ------------------------------------------------------------------
-    async def start(self, script_version: str, caller_id: str) -> None:
+    async def start(self, script_version: str, caller_id: str, voice_id: Optional[str] = None) -> None:
         try:
             from database.models import CallRecord, utcnow
             from database.session import AsyncSessionLocal
@@ -77,19 +77,48 @@ class CallRecorder:
             async with AsyncSessionLocal() as db:
                 existing = await db.get(CallRecord, self.identity.call_id)
                 if existing is None:
-                    existing = CallRecord(call_id=self.identity.call_id, lead_id=self.identity.lead_id,
+                    existing = CallRecord(call_id=self.identity.call_id, client_id=self.identity.client_id,
+                                          lead_id=self.identity.lead_id,
                                           campaign_id=self.identity.campaign_id, caller_id_used=caller_id,
                                           direction="console" if self.console else "outbound")
                     db.add(existing)
                 existing.status = "in_progress"
                 existing.script_version = script_version
-                existing.voice_id = self.settings.BULBUL_TTS_VOICE_ID
-                existing.answered_at = utcnow()
+                existing.voice_id = voice_id or self.settings.tts_voice
+                if self.console:
+                    existing.answered_at = utcnow()
                 await db.commit()
         except Exception as e:
             self._db_ok = False
             logger.warning(f"Call record not created (DB unavailable?): {e!r}")
         self._flusher = asyncio.create_task(self._flush_loop())
+
+    async def mark_answered(self) -> None:
+        """The customer picked up: billing and duration count from here, not from dialing."""
+        try:
+            from database.models import CallRecord, utcnow
+            from database.session import AsyncSessionLocal
+
+            async with AsyncSessionLocal() as db:
+                rec = await db.get(CallRecord, self.identity.call_id)
+                if rec:
+                    rec.answered_at = utcnow()
+                    await db.commit()
+        except Exception as e:
+            logger.warning(f"Answer time not written: {e!r}")
+
+    async def set_recording(self, key: str) -> None:
+        try:
+            from database.models import CallRecord
+            from database.session import AsyncSessionLocal
+
+            async with AsyncSessionLocal() as db:
+                rec = await db.get(CallRecord, self.identity.call_id)
+                if rec:
+                    rec.recording_url = key
+                    await db.commit()
+        except Exception as e:
+            logger.warning(f"Recording location not written: {e!r}")
 
     async def _flush_loop(self) -> None:
         while not self.finalized:
@@ -124,7 +153,8 @@ class CallRecorder:
             from database.session import AsyncSessionLocal
 
             async with AsyncSessionLocal() as db:
-                db.add(ConsentRecord(lead_id=self.identity.lead_id, phone_number=self.identity.phone_number,
+                db.add(ConsentRecord(client_id=self.identity.client_id, lead_id=self.identity.lead_id,
+                                     phone_number=self.identity.phone_number,
                                      call_id=self.identity.call_id, event="disclosure_played",
                                      consent_source="call", disclosure_played=True, disclosure_played_at=utcnow()))
                 await db.commit()
@@ -138,7 +168,7 @@ class CallRecorder:
         self.finalized = True
         summary = engine.summary()
         usage = summary["usage"]
-        outcome = summary["outcome"] or ("interested" if summary["stage_reached"] in ("PITCH", "CLOSE_NEXT_STEP") else "not_interested")
+        outcome = summary["outcome"] or "unclear"  # never guess a result the customer did not give
         cost = CostCalculator.compute_call_cost(
             duration_seconds=int(duration_seconds), stt_audio_seconds=self.stt_seconds,
             tts_character_count=self.tts_chars, llm_input_tokens=usage.input_tokens,
@@ -154,6 +184,7 @@ class CallRecorder:
         if not self._db_ok:
             return
         try:
+            from campaign.billing import debit_call
             from database.models import CallRecord, CRMOutbox, utcnow
             from database.session import AsyncSessionLocal
 
@@ -186,8 +217,10 @@ class CallRecorder:
                 rec.call_state = _jsonable({**summary["call_state"], "tool_log": summary["tool_log"],
                                             "stage_history": summary["stage_history"]})
                 rec.error = self.error
+                if not self.console and rec.answered_at is not None:
+                    rec.client_billed_seconds = await debit_call(db, rec.client_id, rec.call_id, int(duration_seconds))
                 if outcome in CRM_OUTCOMES and not self.console:
-                    db.add(CRMOutbox(event_type=f"call.{outcome}", payload=_jsonable({
+                    db.add(CRMOutbox(client_id=rec.client_id, event_type=f"call.{outcome}", payload=_jsonable({
                         "call_id": self.identity.call_id, "lead_id": self.identity.lead_id,
                         "campaign_id": self.identity.campaign_id, "outcome": outcome,
                         "stage_reached": summary["stage_reached"], "call_state": summary["call_state"]})))
@@ -234,10 +267,12 @@ class CallRecorder:
                 lead.status = "done"
             elif outcome == "callback_scheduled":
                 lead.status = "pending"  # the callback job already exists
+            elif outcome == "manager_callback":
+                lead.status = "done"  # an expert follows up by hand
             elif outcome in RETRY_DELAYS and (lead.attempt_count or 0) < max_attempts:
                 when = utcnow() + RETRY_DELAYS[outcome]
                 lead.status, lead.next_attempt_at = "pending", when
-                db.add(DialJob(lead_id=lead.id, campaign_id=self.identity.campaign_id, scheduled_at=when,
+                db.add(DialJob(client_id=lead.client_id, lead_id=lead.id, campaign_id=self.identity.campaign_id, scheduled_at=when,
                                reason="retry", attempt_number=(lead.attempt_count or 0) + 1))
             else:
                 lead.status = "exhausted" if outcome in RETRY_DELAYS else "done"

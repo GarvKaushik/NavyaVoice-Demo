@@ -75,6 +75,7 @@ async def test_injected_price_never_reaches_the_caller():
 async def test_unapproved_commitment_is_blocked():
     e = engine_with([[text("Maine payment link aapke WhatsApp par bhej diya hai.")]])
     e.opening()
+    await reply(e, "theek hai")  # the greeting
     out = await reply(e, "theek hai")
     assert out[0].kind == "guard_replacement"
 
@@ -88,7 +89,7 @@ async def test_opt_out_is_honoured_immediately_and_permanently():
     assert out[0].phrase_id == "opt_out_confirmed"
     assert e.pending_action.kind == "end_call" and e.outcome == "opted_out"
     assert e.llm.calls == []  # LLM never invoked
-    assert await get_redis_service().is_dnd_or_opted_out(phone)
+    assert await get_redis_service().is_dnd_or_opted_out(phone, "CLIENT-DEMO")
 
 
 async def test_backchannel_during_agent_speech_is_ignored():

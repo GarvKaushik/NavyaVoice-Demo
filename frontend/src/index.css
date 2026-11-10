@@ -19,3 +19,16 @@
 .pulse-ring {
   animation: pulse-ring 1.5s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
 }
+
+/* Landing demo: voice bars move while the agent speaks */
+@keyframes voice-bar {
+  0%, 100% { transform: scaleY(0.35); }
+  50% { transform: scaleY(1); }
+}
+.voice-bar {
+  transform-origin: bottom;
+  animation: voice-bar 0.8s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .voice-bar, .pulse-ring { animation: none; }
+}

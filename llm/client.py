@@ -12,6 +12,7 @@ a self-hosted vLLM). Provides:
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -36,6 +37,7 @@ class LLMEndpoint:
     api_key: str
     model: str
     extra_body: Dict[str, Any] = field(default_factory=dict)
+    provider: str = "sarvam"
 
 
 @dataclass
@@ -43,6 +45,7 @@ class ToolCall:
     id: str
     name: str
     arguments: str
+    extra_content: Optional[Dict[str, Any]] = None  # Gemini's signature, which must be sent back with the tool result
 
     def parsed_arguments(self) -> Dict[str, Any]:
         try:
@@ -110,13 +113,50 @@ def _breaker(name: str) -> CircuitBreaker:
     return _BREAKERS.setdefault(name, CircuitBreaker())
 
 
-def _headers(api_key: str) -> Dict[str, str]:
-    # Sarvam accepts api-subscription-key; every other OpenAI-compatible vendor uses Bearer.
-    return {
-        "Authorization": f"Bearer {api_key}",
-        "api-subscription-key": api_key,
-        "Content-Type": "application/json",
-    }
+def _headers(ep: LLMEndpoint) -> Dict[str, str]:
+    headers = {"Authorization": f"Bearer {ep.api_key}", "Content-Type": "application/json"}
+    if ep.provider == "sarvam":
+        headers["api-subscription-key"] = ep.api_key
+    return headers
+
+
+def is_reasoning_model(model: str) -> bool:
+    return bool(re.match(r"(o\d|gpt-5)", model.lower()))
+
+
+def default_reasoning_effort(model: str) -> str:
+    """The lowest effort each family supports, so the first token isn't delayed."""
+    name = model.lower()
+    if re.match(r"gpt-5\.\d", name):
+        return "none"
+    return "minimal" if name.startswith("gpt-5") else "low"
+
+
+def build_endpoint(provider: str, name: str) -> LLMEndpoint:
+    """The one place a provider name becomes a URL, key and model. All providers share the same client."""
+    s = get_settings()
+    if provider == "openai":
+        if not s.OPENAI_API_KEY:
+            raise ValueError("LLM provider is openai but OPENAI_API_KEY is not set")
+        return LLMEndpoint(name, s.OPENAI_BASE_URL, s.OPENAI_API_KEY, s.OPENAI_MODEL, {}, provider)
+    if provider == "selfhosted":
+        if not (s.SELFHOSTED_LLM_BASE_URL and s.SELFHOSTED_LLM_MODEL):
+            raise ValueError("LLM provider is selfhosted but SELFHOSTED_LLM_BASE_URL or SELFHOSTED_LLM_MODEL is not set")
+        return LLMEndpoint(name, s.SELFHOSTED_LLM_BASE_URL, s.SELFHOSTED_LLM_API_KEY or "none", s.SELFHOSTED_LLM_MODEL,
+                           {}, provider)
+    return LLMEndpoint(name, s.REALTIME_LLM_BASE_URL, s.REALTIME_LLM_API_KEY, s.REALTIME_LLM_MODEL,
+                       s.realtime_llm_extra_body, "sarvam")
+
+
+def realtime_endpoints() -> List[LLMEndpoint]:
+    s = get_settings()
+    endpoints = [build_endpoint(s.LLM_PROVIDER, "primary")]
+    if s.LLM_FALLBACK_PROVIDER and s.LLM_FALLBACK_PROVIDER != s.LLM_PROVIDER:
+        endpoints.append(build_endpoint(s.LLM_FALLBACK_PROVIDER, "fallback"))
+    elif s.REALTIME_LLM_FALLBACK_BASE_URL and s.REALTIME_LLM_FALLBACK_MODEL:
+        endpoints.append(LLMEndpoint("fallback", s.REALTIME_LLM_FALLBACK_BASE_URL, s.REALTIME_LLM_FALLBACK_API_KEY,
+                                     s.REALTIME_LLM_FALLBACK_MODEL, s.fallback_llm_extra_body))
+    return endpoints
 
 
 def _usage_from(payload: Dict[str, Any]) -> Optional[Usage]:
@@ -154,20 +194,16 @@ class LLMClient:
 
     @classmethod
     def realtime(cls, http_client: Optional[httpx.AsyncClient] = None) -> "LLMClient":
-        s = get_settings()
-        endpoints = [LLMEndpoint("primary", s.REALTIME_LLM_BASE_URL, s.REALTIME_LLM_API_KEY,
-                                 s.REALTIME_LLM_MODEL, s.realtime_llm_extra_body)]
-        if s.REALTIME_LLM_FALLBACK_BASE_URL and s.REALTIME_LLM_FALLBACK_MODEL:
-            endpoints.append(LLMEndpoint("fallback", s.REALTIME_LLM_FALLBACK_BASE_URL,
-                                         s.REALTIME_LLM_FALLBACK_API_KEY, s.REALTIME_LLM_FALLBACK_MODEL,
-                                         s.fallback_llm_extra_body))
-        return cls(endpoints, http_client=http_client)
+        return cls(realtime_endpoints(), http_client=http_client)
 
     @classmethod
     def offline(cls) -> "LLMClient":
         s = get_settings()
-        endpoint = LLMEndpoint("offline", s.OFFLINE_LLM_BASE_URL, s.OFFLINE_LLM_API_KEY or s.REALTIME_LLM_API_KEY,
-                               s.OFFLINE_LLM_MODEL, {})
+        if s.LLM_PROVIDER == "sarvam":
+            endpoint = LLMEndpoint("offline", s.OFFLINE_LLM_BASE_URL, s.OFFLINE_LLM_API_KEY or s.REALTIME_LLM_API_KEY,
+                                   s.OFFLINE_LLM_MODEL, {})
+        else:
+            endpoint = build_endpoint(s.LLM_PROVIDER, "offline")
         return cls([endpoint], ttft_timeout=60.0, hard_timeout=180.0,
                    http_client=httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0)))
 
@@ -190,14 +226,35 @@ class LLMClient:
             body["tool_choice"] = "auto"
         body.update(ep.extra_body)
         body.update(extra or {})
+        self._apply_provider_rules(ep, body)
         return body
+
+    @staticmethod
+    def _apply_provider_rules(ep: LLMEndpoint, body: Dict[str, Any]) -> None:
+        """Differences between OpenAI-compatible servers. Sarvam requests are left exactly as they were."""
+        if ep.provider == "sarvam":
+            return
+        effort = get_settings().LLM_REASONING_EFFORT
+        body.pop("reasoning_effort", None)
+        if ep.provider == "selfhosted":
+            if effort:
+                body["reasoning_effort"] = effort
+            return
+        tokens = body.pop("max_tokens")
+        if is_reasoning_model(body["model"]):
+            effort = effort or default_reasoning_effort(body["model"])
+            body["reasoning_effort"] = effort
+            body.pop("temperature", None)  # not accepted while reasoning is on
+            if effort != "none":
+                tokens += 400  # this limit also counts hidden reasoning, which could otherwise leave no reply
+        body["max_completion_tokens"] = tokens
 
     async def _stream_endpoint(self, ep: LLMEndpoint, body: Dict[str, Any]) -> AsyncIterator[LLMEvent]:
         """Yields text / tool_calls / done events from one endpoint."""
         url = ep.base_url.rstrip("/") + "/chat/completions"
         pending: Dict[int, Dict[str, str]] = {}
         usage: Optional[Usage] = None
-        async with self._http.stream("POST", url, headers=_headers(ep.api_key), json=body) as resp:
+        async with self._http.stream("POST", url, headers=_headers(ep), json=body) as resp:
             if resp.status_code != 200:
                 detail = (await resp.aread()).decode(errors="replace")[:300]
                 raise httpx.HTTPStatusError(f"{resp.status_code}: {detail}", request=resp.request, response=resp)
@@ -214,16 +271,19 @@ class LLMClient:
                     if delta.get("content"):
                         yield LLMEvent(type="text", text=delta["content"], endpoint=ep.name)
                     for tc in delta.get("tool_calls") or []:
-                        slot = pending.setdefault(int(tc.get("index", 0)), {"id": "", "name": "", "arguments": ""})
+                        slot = pending.setdefault(int(tc.get("index", 0)), {"id": "", "name": "", "arguments": "", "extra_content": None})
                         if tc.get("id"):
                             slot["id"] = tc["id"]
+                        if tc.get("extra_content"):
+                            slot["extra_content"] = tc["extra_content"]
                         fn = tc.get("function") or {}
                         if fn.get("name"):
                             slot["name"] += fn["name"]
                         if fn.get("arguments"):
                             slot["arguments"] += fn["arguments"]
         if pending:
-            calls = [ToolCall(id=v["id"] or f"call_{i}", name=v["name"], arguments=v["arguments"])
+            calls = [ToolCall(id=v["id"] or f"call_{i}", name=v["name"], arguments=v["arguments"],
+                              extra_content=v["extra_content"])
                      for i, v in sorted(pending.items()) if v["name"]]
             if calls:
                 yield LLMEvent(type="tool_calls", tool_calls=calls, endpoint=ep.name)
@@ -344,11 +404,11 @@ class LLMClient:
             with llm_span(purpose, ep.model, messages) as span:
                 try:
                     resp = await asyncio.wait_for(
-                        self._http.post(url, headers=_headers(ep.api_key), json=body), timeout=self.hard_timeout
+                        self._http.post(url, headers=_headers(ep), json=body), timeout=self.hard_timeout
                     )
                     if resp.status_code == 400 and json_mode:
                         body.pop("response_format", None)  # endpoint does not support JSON mode
-                        resp = await self._http.post(url, headers=_headers(ep.api_key), json=body)
+                        resp = await self._http.post(url, headers=_headers(ep), json=body)
                     resp.raise_for_status()
                     payload = resp.json()
                     text = (payload["choices"][0]["message"].get("content") or "").strip()

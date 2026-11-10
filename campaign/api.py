@@ -21,14 +21,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent.dialogue import DialogueEngine
 from agent.knowledge import CampaignKnowledge, load_knowledge
 from agent.tools import CallIdentity, record_opt_out
+from campaign.auth import require_internal
 from campaign.dialer import OutboundDialer
+from campaign.operations import import_leads as add_leads
+from campaign.operations import publish_playbook, start_campaign
+from campaign.portal_api import router as portal_router
 from config.settings import get_settings
-from database.models import CallEvent, CallRecord, ConsentRecord, Lead, Playbook, utcnow
+from database.models import CallEvent, CallRecord, Campaign, DEFAULT_CLIENT_ID, Lead, utcnow
 from database.session import get_db_session
 from llm.client import LLMClient
 from observability.logging_setup import setup_logging
 from observability.metrics import CostCalculator
-from speech.bulbul_tts import BulbulTTSClient, BulbulTTSError, pcm_to_wav, shared_http
+from speech.bulbul_tts import BulbulTTSError, pcm_to_wav, shared_http
+from speech.openai_tts import create_tts_client
 from speech.phrase_cache import PreRenderedPhraseCache
 
 import base64
@@ -48,19 +53,7 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_cr
                    allow_methods=["*"], allow_headers=["*"])
 
 dialer = OutboundDialer()
-
-
-# ------------------------------------------------------------------------------
-# Auth
-# ------------------------------------------------------------------------------
-async def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
-    keys = settings.api_keys
-    if not keys:
-        if settings.is_production:
-            raise HTTPException(503, "API_KEYS must be configured in production")
-        return  # development: open
-    if x_api_key not in keys:
-        raise HTTPException(401, "Invalid or missing X-API-Key")
+app.include_router(portal_router)
 
 
 # ------------------------------------------------------------------------------
@@ -69,8 +62,10 @@ async def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> No
 @app.get("/health", tags=["System"])
 async def health_check():
     return {"status": "healthy", "service": "voice-agent-control-api", "environment": settings.ENVIRONMENT,
-            "llm_model": settings.REALTIME_LLM_MODEL, "tts": f"{settings.BULBUL_TTS_MODEL}/{settings.BULBUL_TTS_VOICE_ID}",
-            "stt": f"{settings.SARVAM_STT_MODEL}/{settings.SARVAM_STT_MODE}"}
+            "llm_model": settings.OPENAI_MODEL if settings.LLM_PROVIDER == "openai" else settings.REALTIME_LLM_MODEL,
+            "tts": f"{settings.tts_model}/{settings.tts_voice}",
+            "stt": settings.STT_PROVIDER if settings.STT_PROVIDER != "sarvam" else f"{settings.SARVAM_STT_MODEL}/{settings.SARVAM_STT_MODE}",
+            "stt_provider": settings.STT_PROVIDER, "llm_provider": settings.LLM_PROVIDER}
 
 
 @app.get("/metrics", tags=["System"])
@@ -108,65 +103,55 @@ class TestCallRequest(BaseModel):
     ignore_calling_window: bool = False
 
 
-@app.post("/campaigns/{campaign_id}/leads", tags=["Campaigns"], dependencies=[Depends(require_api_key)])
+@app.post("/campaigns/{campaign_id}/leads", tags=["Campaigns"], dependencies=[Depends(require_internal)])
 async def import_leads(campaign_id: str, payload: LeadImportRequest, db: AsyncSession = Depends(get_db_session)):
     """Imports leads; consent source is mandatory (DPDP Act) and recorded per lead."""
-    imported, skipped = 0, 0
-    for item in payload.leads:
-        existing = (await db.execute(select(Lead).where(Lead.phone_number == item.phone_number))).scalar()
-        if existing:
-            skipped += 1
-            continue
-        lead_id = f"lead_{uuid.uuid4().hex[:10]}"
-        db.add(Lead(id=lead_id, campaign_id=campaign_id, phone_number=item.phone_number, full_name=item.full_name,
-                    preferred_language=item.preferred_language, timezone=item.timezone, segment=item.segment,
-                    consent_source=item.consent_source, consent_at=utcnow(),
-                    consent_notice_version=settings.CONSENT_NOTICE_VERSION))
-        db.add(ConsentRecord(lead_id=lead_id, phone_number=item.phone_number, consent_source=item.consent_source,
-                             notice_version=settings.CONSENT_NOTICE_VERSION, event="consent_captured"))
-        imported += 1
+    campaign = await db.get(Campaign, campaign_id)
+    if campaign is None:
+        raise HTTPException(404, "campaign not found")
+    result = await add_leads(db, campaign.client_id, campaign_id, payload.leads)
     await db.commit()
-    return {"status": "success", "campaign_id": campaign_id, "imported_leads": imported, "skipped_existing": skipped}
+    return {"status": "success", "campaign_id": campaign_id, **result}
 
 
-@app.post("/campaigns/{campaign_id}/start", tags=["Campaigns"], dependencies=[Depends(require_api_key)])
+@app.post("/campaigns/{campaign_id}/start", tags=["Campaigns"], dependencies=[Depends(require_internal)])
 async def trigger_campaign(campaign_id: str, payload: CampaignTriggerRequest, db: AsyncSession = Depends(get_db_session)):
-    """Dispatches eligible leads of this campaign (each passes compliance checks first)."""
-    leads = (await db.execute(
-        select(Lead).where(Lead.campaign_id == campaign_id, Lead.is_dnd.is_(False),
-                           Lead.status.in_(["pending", "in_progress"]),
-                           Lead.attempt_count < settings.MAX_DIAL_ATTEMPTS_PER_LEAD).limit(payload.batch_size)
-    )).scalars().all()
-    if not leads:
+    """Queues eligible leads for the dialer service (each passes compliance checks before dialing)."""
+    campaign = await db.get(Campaign, campaign_id)
+    if campaign is None:
+        raise HTTPException(404, "campaign not found")
+    campaign.is_promotional = payload.is_promotional
+    queued = await start_campaign(db, campaign, payload.batch_size)
+    await db.commit()
+    if not queued:
         return {"status": "no_eligible_leads", "campaign_id": campaign_id}
-
-    async def _dial_batch():
-        for lead in leads:
-            await dialer.dial_single_lead(lead.id, lead.phone_number, lead.attempt_count, campaign_id,
-                                          payload.is_promotional, lead.full_name, lead.timezone, lead.segment)
-            await asyncio.sleep(1.0 / max(settings.PLIVO_MAX_CALLS_PER_SECOND, 1))
-
-    asyncio.create_task(_dial_batch())
-    return {"status": "campaign_triggered", "campaign_id": campaign_id, "leads_queued": len(leads)}
+    return {"status": "campaign_triggered", "campaign_id": campaign_id, "leads_queued": queued}
 
 
-@app.post("/calls/test", tags=["Calls"], dependencies=[Depends(require_api_key)])
+@app.post("/calls/test", tags=["Calls"], dependencies=[Depends(require_internal)])
 async def place_test_call(req: TestCallRequest, db: AsyncSession = Depends(get_db_session)):
     """Places one real outbound call to a number (e.g. your own phone) through LiveKit SIP + Plivo."""
     if not settings.LIVEKIT_SIP_OUTBOUND_TRUNK_ID:
         raise HTTPException(400, "LIVEKIT_SIP_OUTBOUND_TRUNK_ID not set; run scripts/provision_livekit_sip.py first")
-    lead = (await db.execute(select(Lead).where(Lead.phone_number == req.phone_number))).scalar()
+    campaign = await db.get(Campaign, req.campaign_id)
+    if campaign is None:
+        raise HTTPException(404, "campaign not found")
+    lead = (await db.execute(select(Lead).where(Lead.client_id == campaign.client_id,
+                                                Lead.phone_number == req.phone_number))).scalar()
     if lead is None:
-        lead = Lead(id=f"lead_{uuid.uuid4().hex[:10]}", campaign_id=req.campaign_id, phone_number=req.phone_number,
+        lead = Lead(id=f"lead_{uuid.uuid4().hex[:10]}", client_id=campaign.client_id, campaign_id=req.campaign_id,
+                    phone_number=req.phone_number,
                     full_name=req.customer_name, consent_source="internal test call", consent_at=utcnow())
         db.add(lead)
         await db.commit()
     return await dialer.dial_single_lead(lead.id, lead.phone_number, 0, req.campaign_id, True, req.customer_name,
-                                         lead.timezone, lead.segment, skip_window_check=req.ignore_calling_window)
+                                         lead.timezone, lead.segment, skip_window_check=req.ignore_calling_window,
+                                         client_id=campaign.client_id)
 
 
-@app.get("/calls", tags=["Calls"], dependencies=[Depends(require_api_key)])
+@app.get("/calls", tags=["Calls"], dependencies=[Depends(require_internal)])
 async def list_calls(limit: int = 20, db: AsyncSession = Depends(get_db_session)):
+    """Operator view across all clients, including internal costs. Clients use /api/client/calls."""
     rows = (await db.execute(select(CallRecord).order_by(desc(CallRecord.start_time)).limit(limit))).scalars().all()
     return [{"call_id": r.call_id, "lead_id": r.lead_id, "direction": r.direction, "status": r.status,
              "outcome": r.outcome, "stage_reached": r.stage_reached, "duration_seconds": r.duration_seconds,
@@ -174,7 +159,7 @@ async def list_calls(limit: int = 20, db: AsyncSession = Depends(get_db_session)
              "guard_replacements": r.guard_replacements, "start_time": r.start_time} for r in rows]
 
 
-@app.get("/calls/{call_id}", tags=["Calls"], dependencies=[Depends(require_api_key)])
+@app.get("/calls/{call_id}", tags=["Calls"], dependencies=[Depends(require_internal)])
 async def get_call(call_id: str, db: AsyncSession = Depends(get_db_session)):
     r = await db.get(CallRecord, call_id)
     if r is None:
@@ -187,15 +172,17 @@ async def get_call(call_id: str, db: AsyncSession = Depends(get_db_session)):
 
 class OptOutRequest(BaseModel):
     phone_number: str
+    client_id: str = DEFAULT_CLIENT_ID
     channel: str = "api"
 
 
-@app.post("/opt-outs", tags=["Compliance"], dependencies=[Depends(require_api_key)])
+@app.post("/opt-outs", tags=["Compliance"], dependencies=[Depends(require_internal)])
 async def api_opt_out(req: OptOutRequest, db: AsyncSession = Depends(get_db_session)):
     """Records an opt-out received outside a call (SMS STOP, email, complaint desk)."""
-    lead = (await db.execute(select(Lead).where(Lead.phone_number == req.phone_number))).scalar()
+    lead = (await db.execute(select(Lead).where(Lead.client_id == req.client_id,
+                                                Lead.phone_number == req.phone_number))).scalar()
     identity = CallIdentity(call_id="", lead_id=lead.id if lead else "unknown", campaign_id="",
-                            phone_number=req.phone_number, customer_name="")
+                            phone_number=req.phone_number, customer_name="", client_id=req.client_id)
     await record_opt_out(identity, channel=req.channel)
     return {"status": "opted_out", "phone_number": req.phone_number}
 
@@ -213,7 +200,7 @@ class PromptsUpdateRequest(BaseModel):
 STAGE_ORDER = ["OPENING", "DISCOVERY", "NEED_IDENTIFICATION", "PITCH", "OBJECTION_HANDLING", "CLOSE_NEXT_STEP"]
 
 
-@app.get("/api/prompts", tags=["Prompt Editor"])
+@app.get("/api/prompts", tags=["Prompt Editor"], dependencies=[Depends(require_internal)])
 async def get_prompts(campaign_id: str = "CAMP-REENGAGE-Q4"):
     from agent.stages import StageManager, SalesStage
 
@@ -227,32 +214,19 @@ async def get_prompts(campaign_id: str = "CAMP-REENGAGE-Q4"):
             "objection_playbooks": [{"type": t, "script": s} for t, s in k.objection_playbooks.items()]}
 
 
-@app.post("/api/prompts", tags=["Prompt Editor"], dependencies=[Depends(require_api_key)])
+@app.post("/api/prompts", tags=["Prompt Editor"], dependencies=[Depends(require_internal)])
 async def update_prompts(payload: PromptsUpdateRequest, db: AsyncSession = Depends(get_db_session)):
     """Saves edits as a new approved playbook version; new calls and console sessions pick it up."""
     k = await _knowledge(payload.campaign_id, refresh=True)
     stage_prompts = {**k.stage_prompts, **{s: p for s, p in (payload.stage_prompts or {}).items() if s in STAGE_ORDER}}
     objections = {**k.objection_playbooks, **(payload.objection_playbooks or {})}
-    version = f"v{time.strftime('%Y%m%d-%H%M%S')}"
-    await _retire_playbooks(db, payload.campaign_id)
-    db.add(Playbook(script_version=version, campaign_id=payload.campaign_id, stage_prompts=stage_prompts,
-                    objection_playbooks=objections, status="approved", approved_by=payload.approved_by,
-                    approved_at=utcnow(), created_by=payload.approved_by))
-    from database.models import Campaign
-
     campaign = await db.get(Campaign, payload.campaign_id)
-    if campaign:
-        campaign.script_version = version
+    if campaign is None:
+        raise HTTPException(404, "campaign not found")
+    version = await publish_playbook(db, campaign, stage_prompts, objections, payload.approved_by)
     await db.commit()
     _knowledge_cache.pop(payload.campaign_id, None)
     return {"status": "updated", "script_version": version}
-
-
-async def _retire_playbooks(db: AsyncSession, campaign_id: str) -> None:
-    rows = (await db.execute(select(Playbook).where(Playbook.campaign_id == campaign_id,
-                                                    Playbook.status == "approved"))).scalars().all()
-    for row in rows:
-        row.status = "retired"
 
 
 _knowledge_cache: Dict[str, tuple] = {}
@@ -268,7 +242,7 @@ async def _knowledge(campaign_id: str, refresh: bool = False) -> CampaignKnowled
 
 
 # ------------------------------------------------------------------------------
-# Browser test console: same DialogueEngine as phone calls, Bulbul audio at 8 kHz
+# Browser test console: same DialogueEngine as phone calls, same STT and TTS providers
 # ------------------------------------------------------------------------------
 class ConsoleSession:
     def __init__(self, engine: DialogueEngine):
@@ -280,7 +254,7 @@ class ConsoleSession:
 
 _sessions: Dict[str, ConsoleSession] = {}
 _llm: Optional[LLMClient] = None
-_tts = BulbulTTSClient()
+_tts = create_tts_client()
 _phrases = PreRenderedPhraseCache()
 _phrases.load()
 DEFAULT_SESSION = "default"
@@ -300,7 +274,7 @@ def _session_id(x_session_id: Optional[str]) -> str:
 
 
 async def _audio_for(utterances) -> Optional[str]:
-    """One WAV for the turn: cached phrases from disk, the rest synthesized by Bulbul."""
+    """One WAV for the turn: cached phrases from disk, the rest synthesized live."""
     async def one(u) -> bytes:
         cached = _phrases.get_audio(u.phrase_id) if u.phrase_id else None
         return cached if cached else await _tts.synthesize_pcm(u.text)
@@ -343,7 +317,7 @@ def _response(s: ConsoleSession, utterances, t0: float, fast_intent: Optional[st
     }
 
 
-@app.get("/api/voice/init", tags=["Web Console"])
+@app.get("/api/voice/init", tags=["Web Console"], dependencies=[Depends(require_internal)])
 async def init_voice_session(customer_name: str = "Rajesh", campaign_id: str = "CAMP-REENGAGE-Q4",
                              x_session_id: Optional[str] = Header(default=None)):
     """Starts a console conversation: pre-rendered disclosure + right-person check."""
@@ -351,9 +325,10 @@ async def init_voice_session(customer_name: str = "Rajesh", campaign_id: str = "
     global _llm
     _llm = _llm or LLMClient.realtime()
     sid = _session_id(x_session_id)
+    knowledge = await _knowledge(campaign_id)
     identity = CallIdentity(call_id=f"web_{uuid.uuid4().hex[:8]}", lead_id="LEAD-TEST-001", campaign_id=campaign_id,
-                            phone_number="+919876543210", customer_name=customer_name)
-    engine = DialogueEngine(identity, await _knowledge(campaign_id), _llm, observer_llm=_llm)
+                            phone_number="+919876543210", customer_name=customer_name, client_id=knowledge.client_id)
+    engine = DialogueEngine(identity, knowledge, _llm, observer_llm=_llm)
     s = ConsoleSession(engine)
     _sessions[sid] = s
     t0 = time.monotonic()
@@ -362,9 +337,9 @@ async def init_voice_session(customer_name: str = "Rajesh", campaign_id: str = "
     return _response(s, utterances, t0, None, await _audio_for(utterances))
 
 
-@app.post("/api/voice/turn", tags=["Web Console"])
+@app.post("/api/voice/turn", tags=["Web Console"], dependencies=[Depends(require_internal)])
 async def process_voice_turn(turn: UserTurnRequest, x_session_id: Optional[str] = Header(default=None)):
-    """Runs one caller turn through the full engine and returns the reply with Bulbul audio."""
+    """Runs one caller turn through the full engine and returns the reply with audio."""
     _require_console()
     s = _sessions.get(_session_id(x_session_id))
     if s is None:
@@ -383,7 +358,24 @@ async def process_voice_turn(turn: UserTurnRequest, x_session_id: Optional[str] 
     return _response(s, utterances, t0, fast_intent, await _audio_for(utterances))
 
 
-async def _sarvam_stt(audio: bytes) -> str:
+async def _local_stt(audio: bytes) -> str:
+    """Sends a browser WAV to the local STT server."""
+    import io
+    import wave
+
+    from speech.local_stt import ServerDecodeError, decode_on_server
+
+    with wave.open(io.BytesIO(audio), "rb") as w:
+        rate, pcm = w.getframerate(), w.readframes(w.getnframes())
+    try:
+        return await decode_on_server(settings.STT_PROVIDER, pcm, rate)
+    except ServerDecodeError as e:
+        raise HTTPException(502, f"Local STT error: {e}. Is the STT server running? (python -m speech.stt_server)")
+
+
+async def _transcribe(audio: bytes) -> str:
+    if settings.STT_PROVIDER != "sarvam":
+        return await _local_stt(audio)
     resp = await shared_http().post(
         settings.SARVAM_STT_URL,
         headers={"api-subscription-key": settings.SARVAM_API_KEY},
@@ -396,19 +388,19 @@ async def _sarvam_stt(audio: bytes) -> str:
     return (resp.json().get("transcript") or "").strip()
 
 
-@app.post("/api/voice/stt", tags=["Web Console"])
+@app.post("/api/voice/stt", tags=["Web Console"], dependencies=[Depends(require_internal)])
 async def console_stt(request: Request):
-    """Transcribes one recorded utterance (WAV body) with Sarvam STT, same model/mode as phone calls."""
+    """Transcribes one recorded utterance (WAV body) with the same STT provider as phone calls."""
     _require_console()
     audio = await request.body()
     if len(audio) < 1000:
         return {"transcript": "", "latency_ms": 0}
     t0 = time.monotonic()
-    transcript = await _sarvam_stt(audio)
+    transcript = await _transcribe(audio)
     return {"transcript": transcript, "latency_ms": round((time.monotonic() - t0) * 1000)}
 
 
-@app.post("/api/voice/turn_audio", tags=["Web Console"])
+@app.post("/api/voice/turn_audio", tags=["Web Console"], dependencies=[Depends(require_internal)])
 async def process_audio_turn(request: Request, x_session_id: Optional[str] = Header(default=None)):
     """One caller turn from recorded audio, streamed as NDJSON like a live call:
     transcript -> each reply sentence with its audio as soon as it is synthesized -> done (metrics)."""
@@ -423,7 +415,7 @@ async def process_audio_turn(request: Request, x_session_id: Optional[str] = Hea
         t0 = time.monotonic()
         line = lambda obj: (json.dumps(obj, ensure_ascii=False, default=str) + "\n").encode()  # noqa: E731
 
-        transcript = await _sarvam_stt(audio) if len(audio) > 1000 else ""
+        transcript = await _transcribe(audio) if len(audio) > 1000 else ""
         stt_ms = round((time.monotonic() - t0) * 1000)
         yield line({"type": "transcript", "text": transcript, "stt_ms": stt_ms})
         if not transcript or e.pending_action is not None:
@@ -475,7 +467,7 @@ async def process_audio_turn(request: Request, x_session_id: Optional[str] = Hea
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 
-@app.post("/api/tts", tags=["Web Console"])
+@app.post("/api/tts", tags=["Web Console"], dependencies=[Depends(require_internal)])
 async def tts_preview(body: Dict[str, str]):
     """Synthesizes any text with the campaign voice (for listening tests). Returns audio/wav."""
     _require_console()

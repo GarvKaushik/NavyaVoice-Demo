@@ -13,6 +13,7 @@ text simulations. Per caller turn:
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -22,8 +23,8 @@ from agent.callback_time import parse_callback_time
 from agent.knowledge import CampaignKnowledge
 from agent.observer import CallObserver, CallState
 from agent.prompts import build_messages
-from agent.stages import SalesStage, StageManager, extract_signals
-from agent.tools import TOOL_SCHEMAS, CallIdentity, CallTools, PendingAction, record_opt_out
+from agent.stages import CallStep, SalesStage, StageManager, extract_signals, link_consent, opt_out_clarity
+from agent.tools import CONFIRMED_OUTCOMES, CallIdentity, CallTools, PendingAction, record_opt_out, tool_schemas_for
 from guardrails.authorization import AuthorizationContext
 from guardrails.backchannel_filter import BackchannelFilter
 from guardrails.fast_path_guard import FastPathGuard
@@ -36,7 +37,11 @@ from speech.phrase_cache import PreRenderedPhraseCache as P
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 3
-MAX_SENTENCES_PER_REPLY = 3  # prompt asks for 2; the cap is a safety net that keeps the closing question
+MAX_REPLY_WORDS = 25  # beyond this, only a closing question may still be spoken
+MAX_REPLY_WORDS_WITH_QUESTION = 36
+MAX_SENTENCES_PER_REPLY = 3  # the prompt asks for 2; the third is only ever a closing question
+NAME_EVERY_REPLIES = 3  # replies that must pass before the customer's name may be used again
+OPT_OUT_CONFIRM_QUESTION = "Kya main aapka number calling list se hata doon?"
 
 
 @dataclass
@@ -69,9 +74,12 @@ class DialogueEngine:
         self.identity = identity
         self.knowledge = knowledge
         self.llm = llm
-        self.phrases = P()
+        self.phrases = P(voice=knowledge.voice_id, company=knowledge.company_name, persona=knowledge.persona_name,
+                         complaint_contact=knowledge.complaint_contact)
         self.auth = AuthorizationContext()
         self.tools = CallTools(identity, knowledge, self.auth)
+        self.tools.price_allowed = False  # until the customer asks, objects or wants to buy
+        self.tools.amount_heard = False
         self.stage = StageManager()
         self.state = CallState(identity.lead_id, identity.phone_number, identity.campaign_id)
         self.observer = CallObserver(self.state, observer_llm, on_intent=self._on_late_intent)
@@ -86,6 +94,11 @@ class DialogueEngine:
         self.turns = 0
         self.guard_replacements = 0
         self.awaiting_callback_time = False
+        self.awaiting_opt_out_confirm = False
+        self.price_requested = False
+        self._replies_since_name = 0  # the opening already used the name
+        self._name_in_reply = False
+        self._said_amount: Optional[str] = None
         self.opening_denials = 0
         self.disclosure_played = False
         self.last_reply = ""
@@ -141,12 +154,20 @@ class DialogueEngine:
         self._say("customer", text)
         self.history.append({"role": "user", "content": text})
         self._emit("transcript", {"text": text, "turn": self.turns})
+        self.tools.link_consented = link_consent(text, self.last_reply)
+        self.tools.opt_out_allowed = opt_out_clarity(text) != "none"
+        self.tools.end_call_allowed = True
 
         fast = self.fast_path.evaluate(text)
         if fast.triggered:
             m.record_fast_path(fast.intent)
             self._emit("fast_path", {"intent": fast.intent})
             return await self._handle_intent(fast.intent, text)
+
+        if self.awaiting_opt_out_confirm:
+            self.awaiting_opt_out_confirm = False
+            if extract_signals(text).affirmative:
+                return await self._handle_intent("opt_out", text)
 
         if self.awaiting_callback_time:
             return await self._schedule_from_text(text, default="kal subah")
@@ -157,7 +178,21 @@ class DialogueEngine:
             self._end("not_interested")
             return self._scripted([self._phrase(P.PERMISSION_DENIED_CLOSE)], "permission_denied")
 
+        if (self.stage.current_stage == SalesStage.COMPLETED and self.outcome in CONFIRMED_OUTCOMES
+                and not (sig.question or sig.objection or sig.buying_signal)):
+            self._end(self.outcome)
+            return self._scripted([self._phrase(P.GOODBYE)], "goodbye")
+
+        self._apply_answer_to_agent_question(sig)
+        self.stage.note_known_needs(self.state.identified_needs)
         reason = self.stage.apply(sig)
+        if self.stage.step == CallStep.DECLINED:
+            self._end("not_interested")
+            return self._scripted([self._phrase(P.PERMISSION_DENIED_CLOSE)], "permission_denied")
+        self.tools.end_call_allowed = self.stage.step != CallStep.OFFER_AGAIN  # it still has a question to ask
+        if sig.asks_price or sig.wants_price or sig.objection or sig.buying_signal:
+            self.tools.price_allowed = True
+        self.price_requested = sig.wants_price
         self.observer.apply_signals(sig)
         self.state.current_stage = self.stage.current_stage.value
         if reason:
@@ -166,7 +201,48 @@ class DialogueEngine:
         task = asyncio.create_task(self.observer.observe_turn(text, self.last_reply))
         self._observer_tasks.add(task)
         task.add_done_callback(self._observer_tasks.discard)
-        return None
+        line = self.stage.line_for_step(self.identity.customer_name)
+        if line:
+            return self._scripted([Utterance(line)], self.stage.step.value)
+        return await self._book_chosen_slot(text, sig)
+
+    async def _book_chosen_slot(self, text: str, sig) -> Optional[ScriptedTurn]:
+        """A customer who picks an offered slot gets booked by code, so the agent cannot only claim it did."""
+        if sig.negative or self.outcome == "demo_booked" or "baje" not in self.last_reply.lower():
+            return None
+        slot_id = self.tools.slot_from_words(text)
+        if slot_id is None:
+            return None
+        args = {"slot_id": slot_id}
+        result = await self.tools.execute("book_demo", args)
+        self._emit("tool_call", {"tool": "book_demo", "arguments": args, "result": result})
+        if not result.get("ok"):
+            return None
+        self.price_requested = False
+        self.stage.transition_to(SalesStage.COMPLETED, "Action confirmed: demo_booked")
+        return self._scripted([Utterance(result["approved_phrasing"])], "book_demo")
+
+    def _apply_answer_to_agent_question(self, sig) -> None:
+        """A plain yes accepts what the agent just asked: "follow-up miss hota hai kya?" confirms that need,
+        "demo dekhna chahenge?" is a buying signal, "price jaanna chahenge?" asks for the price."""
+        question = re.split(r"(?<=[.!?])\s+", self.last_reply.strip())[-1]
+        if (self.stage.current_stage == SalesStage.OPENING or not sig.affirmative or not question.endswith("?")
+                or not self.stage.last_agent_question_closed):
+            return
+        asked = extract_signals(question)
+        sig.needs = sig.needs + [n for n in asked.needs if n not in sig.needs]
+        sig.buying_signal = sig.buying_signal or asked.buying_signal
+        sig.asks_price = sig.asks_price or asked.asks_price
+        sig.wants_price = sig.wants_price or asked.wants_price
+
+    def _fits_reply(self, sentence: str, spoken: List[str]) -> bool:
+        """Keeps replies short: the first sentence always plays, then only what fits the word limit."""
+        if not spoken:
+            return True
+        words = len(" ".join(spoken).split()) + len(sentence.split())
+        if sentence.rstrip().endswith("?"):
+            return len(spoken) < MAX_SENTENCES_PER_REPLY and words <= MAX_REPLY_WORDS_WITH_QUESTION
+        return len(spoken) < 2 and words <= MAX_REPLY_WORDS
 
     def _scripted(self, utterances: List[Utterance], intent: Optional[str]) -> ScriptedTurn:
         for u in utterances:
@@ -196,7 +272,7 @@ class DialogueEngine:
             result = await self.tools.tool_transfer_to_human(reason="customer_requested_human")
             if result.get("transferred"):
                 return self._scripted([self._phrase(P.TRANSFER_TO_AGENT)], intent)
-            self._end("callback_scheduled")
+            self._end("manager_callback")
             return self._scripted([Utterance(result["approved_phrasing"] + " Dhanyawaad.")], intent)
         if intent == "call_later":
             when = parse_callback_time(text, tz_name=self.identity.timezone)
@@ -222,7 +298,8 @@ class DialogueEngine:
             from database.session import AsyncSessionLocal
 
             async with AsyncSessionLocal() as db:
-                db.add(Complaint(phone_number=self.identity.phone_number, lead_id=self.identity.lead_id,
+                db.add(Complaint(client_id=self.identity.client_id, phone_number=self.identity.phone_number,
+                                 lead_id=self.identity.lead_id,
                                  call_id=self.identity.call_id, channel="voice", description=text))
                 await db.commit()
         except Exception as e:
@@ -234,12 +311,24 @@ class DialogueEngine:
             return
         if intent not in {"opt_out", "transfer_human", "abuse", "complaint", "wrong_person"}:
             return
+        if intent == "opt_out":
+            last_customer = next((t["text"] for t in reversed(self.transcript) if t["speaker"] == "customer"), "")
+            clarity = opt_out_clarity(last_customer)
+            if clarity == "none" or (clarity == "unclear" and "opt_out_confirm" in self._handled_intents):
+                logger.info(f"Observer opt-out ignored on a short answer on {self.identity.call_id}")
+                return
+            if clarity == "unclear":
+                intent = "opt_out_confirm"
         logger.warning(f"Observer late intent '{intent}' ({confidence:.2f}) on {self.identity.call_id}")
         self._emit("late_intent", {"intent": intent, "confidence": confidence})
         if self.late_intent_handler:
             await self.late_intent_handler(intent)
 
     async def handle_late_intent(self, intent: str) -> ScriptedTurn:
+        if intent == "opt_out_confirm":
+            self._handled_intents.add(intent)
+            self.awaiting_opt_out_confirm = True
+            return self._scripted([Utterance(OPT_OUT_CONFIRM_QUESTION)], intent)
         last_customer = next((t["text"] for t in reversed(self.transcript) if t["speaker"] == "customer"), "")
         return await self._handle_intent(intent, last_customer)
 
@@ -253,6 +342,57 @@ class DialogueEngine:
             self.auth.authorize_text(answer)  # approved playbook values may be spoken
         return answer, kind
 
+    def _price_target(self, text: str) -> Optional[tuple]:
+        """The (sku, plan) a price question means: the main product, unless another plan is named."""
+        main = self.knowledge.primary_product()
+        if main is None:
+            return None
+        t = text.lower()
+        sku = next((c.sku for c in self.knowledge.catalog.values()
+                    if c.sku != main.sku and c.name.lower().split()[-1] in t), main.sku)
+        plan = "Annual" if re.search(r"\b(annual|yearly|year|saal|salana)\b", t) else "Monthly"
+        if (sku, plan) in self.knowledge.catalog:
+            return sku, plan
+        return (sku, main.plan) if (sku, main.plan) in self.knowledge.catalog else None
+
+    async def _price_line(self) -> Optional[Utterance]:
+        """Answers a price question from the catalog, so the answer does not depend on the model."""
+        if not self.price_requested:
+            return None
+        self.price_requested = False
+        text = next((t["text"] for t in reversed(self.transcript) if t["speaker"] == "customer"), "")
+        target = self._price_target(text)
+        if target is None or target in self.tools._presented_offers:  # the offer price was already quoted
+            return None
+        args = {"sku": target[0], "plan": target[1]}
+        self.tools.price_allowed = True
+        result = await self.tools.execute("get_price", args)
+        self._emit("tool_call", {"tool": "get_price", "arguments": args, "result": result})
+        return Utterance(result["approved_phrasing"]) if result.get("ok") else None
+
+    def _trim_name(self, sentence: str) -> str:
+        """Removes the customer's name when it was used too recently; models tend to open every reply with it."""
+        name = (self.identity.customer_name or "").split()
+        if not name:
+            return sentence
+        pattern = re.compile(rf"(?P<lead>[,—–-]?\s*)\b{re.escape(name[0])}(?:\s+\w+)?\s+(?:ji|sir|sahab)\b(?!\s+(?:se|ko|ka|ki|ke|ne|par|hi)\b)(?P<trail>\s*[,—–-]?\s*)", re.I)
+        if not pattern.search(sentence):
+            return sentence
+        if self._replies_since_name >= NAME_EVERY_REPLIES and not self._name_in_reply:
+            self._name_in_reply = True
+            return sentence
+
+        def replace(m: re.Match) -> str:
+            if m.start() == 0 or not re.search(r"\w", sentence[m.end():]):
+                return ""
+            # Without a comma the name may be part of the sentence, so it stays
+            return ", " if re.search(r"[,—–-]", m.group("lead") + m.group("trail")) else m.group(0)
+
+        trimmed = re.sub(r"\s+([.?!,])", r"\1", pattern.sub(replace, sentence)).strip()
+        if not re.search(r"\w", trimmed):
+            return sentence
+        return trimmed[0].upper() + trimmed[1:]
+
     async def stream_reply(self) -> AsyncIterator[Utterance]:
         """Generates the reply sentence by sentence; every sentence passes the output guard first."""
         if self.llm is None:
@@ -263,12 +403,20 @@ class DialogueEngine:
         stage_prompt = self.knowledge.stage_prompts.get(self.stage.current_stage.value, "")
         self.auth.authorize_text(stage_prompt)
         answer, kind = self._objection_context()
-        messages = build_messages(self.knowledge, self.stage, self.state, self.identity.customer_name,
-                                  self.history, answer, kind)
-
         started = time.monotonic()
+        self._name_in_reply = False
         spoken: List[str] = []
-        sentences = 0
+        price_line = await self._price_line()
+        self._said_amount = None
+        if price_line:
+            spoken.append(price_line.text)
+            amount = re.search(r"₹[\d,]+", price_line.text)
+            self._said_amount = amount.group(0) if amount else None
+            yield price_line
+        messages = build_messages(self.knowledge, self.stage, self.state, self.identity.customer_name,
+                                  self.history, answer, kind, offered_slots=self.tools.offered_slot_phrases,
+                                  already_said=price_line.text if price_line else None)
+
         ttft_ms: Optional[float] = None
         filler_played = False
         last_was_replacement = False
@@ -278,8 +426,11 @@ class DialogueEngine:
                 buffer = SentenceBuffer()
                 tool_calls = []
                 round_text = ""
-                tools = TOOL_SCHEMAS if _round < MAX_TOOL_ROUNDS else None
-                async for ev in self.llm.stream_chat(messages, tools=tools, purpose="reply"):
+                # The last round must answer in words. The tool list still has to be sent, because the
+                # API rejects a conversation that has tool results but no tools.
+                extra = {"tool_choice": "none"} if _round == MAX_TOOL_ROUNDS else None
+                async for ev in self.llm.stream_chat(messages, tools=tool_schemas_for(self.knowledge),
+                                                     extra_body=extra, purpose="reply"):
                     if ev.type == "stall":
                         if not filler_played:
                             filler_played = True
@@ -291,8 +442,7 @@ class DialogueEngine:
                         round_text += ev.text
                         for sentence in buffer.push(ev.text):
                             out = self._guarded(sentence, last_was_replacement)
-                            if out and sentences < MAX_SENTENCES_PER_REPLY:
-                                sentences += 1
+                            if out and self._fits_reply(out.text, spoken):
                                 last_was_replacement = out.kind == "guard_replacement"
                                 spoken.append(out.text)
                                 yield out
@@ -302,16 +452,16 @@ class DialogueEngine:
                         self.usage.add(ev.usage)
                 for sentence in buffer.flush():
                     out = self._guarded(sentence, last_was_replacement)
-                    if out and sentences < MAX_SENTENCES_PER_REPLY:
-                        sentences += 1
+                    if out and self._fits_reply(out.text, spoken):
                         last_was_replacement = out.kind == "guard_replacement"
                         spoken.append(out.text)
                         yield out
 
-                if not tool_calls:
+                if not tool_calls or _round == MAX_TOOL_ROUNDS:
                     break
                 messages.append({"role": "assistant", "content": round_text or None, "tool_calls": [
-                    {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments or "{}"}}
+                    {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments or "{}"},
+                     **({"extra_content": tc.extra_content} if tc.extra_content else {})}
                     for tc in tool_calls]})
                 for tc in tool_calls:
                     args = tc.parsed_arguments()
@@ -321,11 +471,17 @@ class DialogueEngine:
         except LLMUnavailableError as e:
             logger.error(f"LLM unavailable mid-call {self.identity.call_id}: {e}")
             m.record_vendor_error("llm", "unavailable")
-            fallback = self._phrase(P.NETWORK_ISSUE_FALLBACK)
-            spoken.append(fallback.text)
-            yield fallback
-            await self.tools.tool_schedule_callback("2 ghante baad")
-            self._end("dropped", reason="llm_unavailable")
+            if self.outcome in CONFIRMED_OUTCOMES:
+                # The action already succeeded: confirm it instead of telling the customer something broke
+                confirmation = Utterance(self.tools.last_confirmation)
+                spoken.append(confirmation.text)
+                yield confirmation
+            else:
+                fallback = self._phrase(P.NETWORK_ISSUE_FALLBACK)
+                spoken.append(fallback.text)
+                yield fallback
+                await self.tools.tool_schedule_callback("2 ghante baad")
+                self._end("dropped", reason="llm_unavailable")
 
         reply = " ".join(spoken).strip()
         if not reply and not self.pending_action:
@@ -336,13 +492,17 @@ class DialogueEngine:
         self._say("agent", reply)
         self.last_reply = reply
         self.stage.note_agent_reply(reply)
+        self._replies_since_name = 0 if self._name_in_reply else self._replies_since_name + 1
         if self.outcome in ("payment_link_sent", "demo_booked") and self.stage.current_stage != SalesStage.COMPLETED:
             self.stage.transition_to(SalesStage.COMPLETED, f"Action confirmed: {self.outcome}")
         self.last_turn_metrics = {"llm_ttft_ms": ttft_ms, "reply_ms": (time.monotonic() - started) * 1000,
-                                  "sentences": sentences}
+                                  "sentences": len(spoken)}
         self._emit("agent_reply", {"text": reply, **self.last_turn_metrics})
 
     def _guarded(self, sentence: str, last_was_replacement: bool) -> Optional[Utterance]:
+        sentence = self._trim_name(sentence)
+        if self._said_amount and self._said_amount in sentence and not sentence.rstrip().endswith("?"):
+            return None  # code already spoke this price on this turn
         result = self.guard.verify_sentence(sentence, context=self.auth)
         if result.passed:
             return Utterance(sentence)

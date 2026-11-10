@@ -1,4 +1,5 @@
-"""Test isolation: temporary SQLite database and in-memory Redis (never the dev services)."""
+"""Test isolation: temporary SQLite database and in-memory Redis (never the dev services).
+Set TEST_DATABASE_URL to run the suite on a throwaway Postgres database instead."""
 
 import asyncio
 import os
@@ -13,7 +14,8 @@ from database.session import configure_database
 @pytest.fixture(scope="session", autouse=True)
 def isolated_backends():
     tmp = tempfile.mkdtemp()
-    configure_database(f"sqlite+aiosqlite:///{os.path.join(tmp, 'test.db')}", read_url="")
+    configure_database(os.environ.get("TEST_DATABASE_URL") or f"sqlite+aiosqlite:///{os.path.join(tmp, 'test.db')}",
+                       read_url="")
     service = redis_service.RedisService("redis://127.0.0.1:1/0")
     service._retry_at = float("inf")  # never connect; in-memory store only
     redis_service._instance = service

@@ -1,5 +1,5 @@
 /* ─────────────────────────────────────────────────────────────
- * App — Main layout for the NavyaNexus AI Voice Agent console.
+ * App — Main layout for the NavyaVoice script console.
  * Three-column layout: Conversation | Voice Control | Sidebar
  * ─────────────────────────────────────────────────────────── */
 import { useState } from "react";
@@ -25,7 +25,7 @@ export default function App() {
         <div className="flex items-center gap-3">
           <span className="text-xl">🎙️</span>
           <div>
-            <h1 className="text-base font-bold text-white tracking-tight">NavyaNexus AI Voice Agent</h1>
+            <h1 className="text-base font-bold text-white tracking-tight">NavyaVoice</h1>
             <p className="text-[11px] text-gray-500">Hinglish Sales Calling Console</p>
           </div>
         </div>

@@ -20,21 +20,25 @@ _SCRIPT_RULE = {
 
 def static_system_prompt() -> str:
     s = get_settings()
-    return f"""You are {s.AGENT_PERSONA_NAME}, a female AI sales assistant calling customers on behalf of {s.COMPANY_NAME} in India.
+    return f"""You are a female AI sales assistant calling customers in India. YOUR NAME and COMPANY are given below.
 You speak natural, warm Hinglish (Hindi mixed with English) the way urban Indians talk on the phone.
-Always use female grammar for yourself (karti hoon, bataungi, bhejti hoon). Call the customer by name with "ji", or "sir"/"ma'am".
+Always use female grammar for yourself (karti hoon, bataungi, bhejti hoon). Rarely use the customer's name: most replies should not contain it.
 {_SCRIPT_RULE.get(s.SCRIPT_MODE, _SCRIPT_RULE['roman'])}
 
 LISTEN FIRST (most important):
 - If the customer asked a question, your first sentence must directly answer THAT question in simple words.
   Never skip, deflect or postpone a question. "Kiska price?" / "Ye kya hai?" / "Kis cheez ka plan hai?" means:
   explain what the product is in one simple line (use PRODUCT INTRO).
-- Never repeat something you already said in this call, and never offer to tell something you already told.
-- Only talk about what the customer asked or what the current stage needs. Do not bring up offers, discounts,
-  other plans, availability or pincode unless the customer asks about them.
+- Never repeat something you already said in this call, including what the product is, and never offer to tell
+  something you already told.
+- After a short answer like "ji haan", move the call forward. Never ask open questions like "aur kya jaanna hai?".
+- Only talk about what the customer asked or what the current stage needs. Do not bring up the price, offers,
+  discounts, other plans, availability or pincode unless the customer asks about them. The system says the price
+  itself when it is time.
 
 REPLY RULES (strict):
-- Maximum 2 short sentences, about 25 words in total. Make the first sentence very short.
+- Keep replies to about 18 words and at most 2 sentences. Go up to 25 words only when explaining the product or
+  answering a detailed question. Make the first sentence very short. Still sound warm and human, never abrupt.
 - Ask only one question at a time, at the end. Then stop and listen.
 - This is a phone call: no lists, no markdown, no emojis, no URLs.
 - You already greeted the customer, introduced yourself and played the AI/recording disclosure.
@@ -56,17 +60,21 @@ CALL HANDLING:
 - Pitch only the MAIN PRODUCT. Mention other plans only if the customer asks for something cheaper, yearly, or other options.
 - Call get_offer ONLY when the customer asks about an offer/discount or says the price is high. If there is no offer,
   do not say so unless they asked.
-- Before sending a payment link, the customer must have heard the exact amount. Send the link for the plan you quoted;
+- Send a payment link only if the customer asked for it or said yes to "kya payment link bhej doon?". A yes to any
+  other question is not agreement. They must have heard the exact amount first. Send the link for the plan you quoted;
   if they did not say WhatsApp or SMS, use WhatsApp. Then call send_payment_link and say the amount it returns.
+- A plain "nahi" answers your question; it does not mean they want no more calls.
 - For a demo, call list_demo_slots, offer at most two slots, and book_demo only after they choose."""
 
 
 def dynamic_context(knowledge: CampaignKnowledge, stage: StageManager, state: CallState, customer_name: str,
-                    objection_answer: Optional[str], objection_type: Optional[str]) -> str:
+                    objection_answer: Optional[str], objection_type: Optional[str],
+                    offered_slots: Optional[Dict[str, str]] = None, already_said: Optional[str] = None) -> str:
     stage_name = stage.current_stage.value
     main = knowledge.primary_product()
     others = [f"{c.name} ({c.sku}, {c.plan})" for c in knowledge.catalog.values() if c is not main]
-    lines: List[str] = [f"CUSTOMER: {customer_name}"]
+    lines: List[str] = [f"YOUR NAME: {knowledge.persona_name}. COMPANY: {knowledge.company_name}.",
+                        f"CUSTOMER: {customer_name}"]
     if main:
         lines.append(f"MAIN PRODUCT: {main.name} (sku {main.sku}, plan {main.plan}). Price only via get_price.")
         lines.append(f"PRODUCT INTRO: {main.description}")
@@ -76,12 +84,13 @@ def dynamic_context(knowledge: CampaignKnowledge, stage: StageManager, state: Ca
         lines.append("OTHER PLANS (only if asked): " + "; ".join(others))
     lines.append(f"CURRENT STAGE: {stage_name}. {stage.get_stage_guidance()}")
     stage_prompt = knowledge.stage_prompts.get(stage_name)
-    if stage_prompt:
+    if stage_prompt and stage_name != "OPENING":  # the opening's steps are fixed below
         lines.append(f"STAGE INSTRUCTIONS: {stage_prompt}")
-    if stage_name == "OPENING" and stage.identity_confirmed:
-        lines.append(f"The customer has confirmed they are {customer_name}. Do not ask who they are again. "
-                     "Now say in one short line which product you are calling about and what it does "
-                     "(from PRODUCT INTRO), then ask if they have 2 minutes.")
+    if knowledge.faqs:
+        lines.append("If the customer asks something not covered above, call search_knowledge before answering.")
+    step_goal = stage.goal_for_step(customer_name, knowledge.company_name)
+    if step_goal:
+        lines.append(f"THIS TURN: {step_goal}")
 
     memory = []
     if state.identified_needs:
@@ -97,6 +106,13 @@ def dynamic_context(knowledge: CampaignKnowledge, stage: StageManager, state: Ca
     if memory:
         lines.append("WHAT YOU KNOW: " + "; ".join(memory))
 
+    if offered_slots:
+        slots = "; ".join(f'"{slot_id}" = {spoken}' for slot_id, spoken in offered_slots.items())
+        lines.append(f"DEMO SLOTS YOU OFFERED: {slots}. To book one, call book_demo with the quoted slot_id.")
+
+    if already_said:
+        lines.append(f'You have ALREADY said this aloud on this turn, so do not repeat it or call get_price: "{already_said}" '
+                     "Now add only one short question offering the next step, a live demo or the payment link.")
     if objection_answer:
         lines.append(f"APPROVED ANSWER for the '{objection_type}' objection. Say it nearly word for word, "
                      f"you may shorten it: \"{objection_answer}\"")
@@ -107,11 +123,12 @@ def dynamic_context(knowledge: CampaignKnowledge, stage: StageManager, state: Ca
 
 def build_messages(knowledge: CampaignKnowledge, stage: StageManager, state: CallState, customer_name: str,
                    history: List[Dict], objection_answer: Optional[str] = None,
-                   objection_type: Optional[str] = None, max_history: int = 10) -> List[Dict]:
+                   objection_type: Optional[str] = None, max_history: int = 10,
+                   offered_slots: Optional[Dict[str, str]] = None, already_said: Optional[str] = None) -> List[Dict]:
     """System prefix + per-turn context + the last few exchanges."""
     # One system message (some providers reject several); the static part leads so prefix caching applies
     system = static_system_prompt() + "\n\n---\n" + dynamic_context(
-        knowledge, stage, state, customer_name, objection_answer, objection_type)
+        knowledge, stage, state, customer_name, objection_answer, objection_type, offered_slots, already_said)
     recent = history[-max_history:]
     while recent and recent[0]["role"] != "user":
         recent = recent[1:]

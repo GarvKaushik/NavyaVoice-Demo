@@ -35,7 +35,7 @@ PERMISSION_GRANT = ["boliye", "bolo", "bataiye", "batao", "kya baat hai", "haan 
                     "sun rahi", "go ahead", "tell me", "haan bataiye", "kahiye"]
 PERMISSION_DENY = ["time nahi hai", "interest nahi", "interested nahi", "nahi chahiye", "mat karo", "not interested",
                    "zaroorat nahi"]
-PRICE_ASK = ["price", "kitne ka", "kitna", "kitni", "cost", "charges", "charge", "fees", "fee", "rate", "paisa",
+PRICE_ASK = ["price", "kitne ka", "kitne", "kitna", "kitni", "cost", "charges", "charge", "fees", "fee", "rate", "paisa",
              "kimat", "keemat", "pricing", "plan kya"]
 PITCH_ASK = ["kya hai ye", "kya hai yeh", "product kya", "kya karta", "features", "kaise kaam", "kya milega",
              "batao kya", "details", "explain"]
@@ -53,11 +53,19 @@ OBJECTIONS: Dict[str, List[str]] = {
 }
 NEED_PATTERNS: Dict[str, List[str]] = {
     "manual calling takes too much time": ["manual", "manually", "time lagta", "samay lagta", "haath se"],
-    "leads get missed or not followed up": ["leads miss", "lead miss", "follow up", "followup", "bhool jaate", "chhoot"],
+    "leads get missed or not followed up": ["leads miss", "lead miss", "follow up", "followup", "follow-up", "bhool jaate", "chhoot"],
     "no tracking of calls and pipeline": ["track nahi", "tracking", "record nahi", "pata nahi chalta", "excel"],
     "slow response to new leads": ["response slow", "late call", "der se call", "time pe call nahi"],
     "team capacity is limited": ["staff kam", "team chhoti", "log kam", "banda nahi", "hiring"],
 }
+MAX_EXPLANATIONS = 2  # after this the customer hears the price instead of more explaining
+MAX_DISCOVERY_TURNS = 4  # short answers must not keep the call in discovery forever
+# A direct request for the price; bare "kitna" also appears in answers like "kitni calls", so it does not count alone
+PRICE_QUESTION = re.compile(r"\b(price|pricing|cost|charges?|fees?|rate|keemat|kimat)\b"
+                            r"|\bkitne\s+(ka|ki|ke|mein|me|paise|rupaye)\b"
+                            r"|\bkitna\s+(lagega|padega|paisa|charge|kharcha)\b")
+# Words that show a refusal is about being contacted, not about the question just asked
+CONTACT_WORDS = re.compile(r"\b(call|calls|phone|fon|number|contact|list|dnd|message|sms|whatsapp|disturb|pareshan\w*|dobara|dubara)\b")
 SMALL_TALK = ["mausam", "weather", "cricket", "match", "khana kha", "aap kahan se", "kahan se bol", "aap kaise ho",
               "aap kaisi ho", "aapka naam", "shaadi", "chhutti", "holiday", "traffic"]
 
@@ -71,6 +79,8 @@ class TurnSignals:
     permission_denied: bool = False
     asks_price: bool = False
     asks_pitch: bool = False
+    wants_price: bool = False
+    identity_yes: bool = False
     buying_signal: bool = False
     objection: Optional[str] = None
     needs: List[str] = field(default_factory=list)
@@ -94,8 +104,77 @@ def extract_signals(text: str) -> TurnSignals:
             sig.objection = kind
             break
     sig.needs = [need for need, words in NEED_PATTERNS.items() if _has(t, words)]
+    sig.identity_yes = _has(t, ["speaking", "bol raha", "bol rahi", "main hi", "main hoon", "haan main"]) and not sig.negative
+    sig.wants_price = bool(PRICE_QUESTION.search(t)) and not sig.objection and not _has(t, ["nahi", "nahin", "mat"])
     sig.small_talk = _has(t, SMALL_TALK) and not (sig.asks_price or sig.buying_signal or sig.needs or sig.objection)
     return sig
+
+
+def opt_out_clarity(text: str) -> str:
+    """How far a turn the classifier called an opt-out can be trusted: "clear", "unclear", or "none" for a short
+    answer such as "ji nahi", which only answers the question just asked."""
+    t = text.lower().strip()
+    if CONTACT_WORDS.search(t):
+        return "clear"
+    return "none" if len(t.split()) <= 4 else "unclear"
+
+
+def link_consent(text: str, last_reply: str) -> bool:
+    """True only when the customer asked for a payment link, or said yes to a question offering only that link."""
+    t = text.lower().strip()
+    if _has(t, ["nahi", "nahin", "mat", "no", "not"]):
+        return False
+    is_question = "?" in t or _has(t, ["kya", "kaise", "kitna", "kab", "kyun"])
+    if not is_question and (_has(t, ["link", "payment", "buy", "subscribe", "le lunga", "le lungi", "le lete", "le lenge"])
+                            or re.search(r"\bkharid\w*", t)):
+        return True
+    question = re.split(r"(?<=[.!?])\s+", last_reply.strip())[-1].lower()
+    if not question.endswith("?") or not _has(question, ["link", "payment"]) or _has(question, ["ya"]):
+        return False
+    return extract_signals(t).affirmative or bool(re.search(r"\bbhej\w*", t))
+
+
+class CallStep(str, Enum):
+    """Where the call is in its fixed path. Each sales stage above can span several of these."""
+    CONFIRM_PERSON = "CONFIRM_PERSON"
+    HOW_ARE_YOU = "HOW_ARE_YOU"
+    OFFER = "OFFER"
+    OFFER_AGAIN = "OFFER_AGAIN"
+    EXPLAIN = "EXPLAIN"
+    PRICE = "PRICE"
+    NEXT_STEP = "NEXT_STEP"
+    DECLINED = "DECLINED"
+
+
+@dataclass(frozen=True)
+class StepPlan:
+    stage: SalesStage
+    line: Optional[str] = None  # spoken as written, with no model call
+    goal: str = ""  # what the model must do on this step
+
+
+# The call's path: edit here to change what the agent does at each step. The order rules are in StageManager._next_step.
+CALL_FLOW: Dict[CallStep, StepPlan] = {
+    CallStep.CONFIRM_PERSON: StepPlan(SalesStage.OPENING, goal=(
+        "The customer has not confirmed who they are. Answer anything they asked, then ask if you are speaking to "
+        "{name} ji. If it is the wrong person, apologise and call end_call with wrong_person.")),
+    CallStep.HOW_ARE_YOU: StepPlan(SalesStage.OPENING, line="Hello {name} ji, aap kaise hain?"),
+    CallStep.OFFER: StepPlan(SalesStage.OPENING, goal=(
+        "The customer is {name} and has just answered how they are. Do not ask who they are. Say, in under 30 words: "
+        "(1) a warm reaction in 2-3 words, and if they asked how you are, say you are fine; (2) one line starting "
+        "'Main {company} se bol rahi hoon' saying what you do, from PRODUCT INTRO, without naming the product; (3) ask if "
+        "they would want a product that does this, like 'Kya aap aisa software lena chahenge jo ...?'. "
+        "No price, features, or questions about how they work now.")),
+    CallStep.OFFER_AGAIN: StepPlan(SalesStage.OPENING, goal=(
+        "They said no to your offer. Say 'koi baat nahi', give one short benefit from PRODUCT INTRO, and ask once more "
+        "if it is worth a look. Under 20 words.")),
+    CallStep.EXPLAIN: StepPlan(SalesStage.PITCH, goal=(
+        "Explain what the product does for them in one line under 20 words, saying something new each time. "
+        "End with a short check like 'aapke kaam ka lagta hai?'. Never ask what else they want to know.")),
+    CallStep.PRICE: StepPlan(SalesStage.CLOSE_NEXT_STEP),  # code speaks the catalog price, then the model offers the next step
+    CallStep.NEXT_STEP: StepPlan(SalesStage.CLOSE_NEXT_STEP),
+    CallStep.DECLINED: StepPlan(SalesStage.OPENING),  # code plays the polite close and ends the call
+}
 
 
 class StageManager:
@@ -115,9 +194,10 @@ class StageManager:
         self.stage_before_objection: SalesStage = SalesStage.PITCH
         self.small_talk_count: int = 0
         self.confirmed_needs: List[str] = []
+        self.discovery_turns: int = 0
         self.handled_objections: Dict[str, int] = {}
-        self.identity_confirmed: bool = False
-        self.permission_granted: bool = False
+        self.step: CallStep = CallStep.EXPLAIN if initial_stage == SalesStage.PITCH else CallStep.CONFIRM_PERSON
+        self.explanations: int = 0
         self.last_agent_question_closed: Optional[bool] = None
         self.history: List[Dict[str, str]] = []
 
@@ -139,6 +219,14 @@ class StageManager:
         open_q = _has(t, ["kaise", "kitna", "kitne", "kaun", "kya kya", "kab", "kyun", "batayiye", "bataiye", "how",
                           "what", "which"])
         self.last_agent_question_closed = not open_q
+        if self.current_stage == SalesStage.PITCH:
+            self.explanations += 1
+        elif self.step == CallStep.PRICE:
+            self.step = CallStep.NEXT_STEP
+
+    def note_known_needs(self, needs: List[str]) -> None:
+        """Adds needs the observer found on earlier turns, so they count towards moving on."""
+        self.confirmed_needs.extend(n for n in needs if n not in self.confirmed_needs)
 
     def on_stage_change(self) -> None:
         self.last_agent_question_closed = None
@@ -162,7 +250,34 @@ class StageManager:
             self.stage_before_objection = self.current_stage
         self.history.append({"from": self.current_stage.value, "to": next_stage.value, "reason": reason})
         self.current_stage = next_stage
+        self.discovery_turns = 0
         self.small_talk_count = 0
+
+    def _next_step(self, sig: TurnSignals) -> CallStep:
+        """The order of the call: what the customer's answer to the current step leads to."""
+        if self.step == CallStep.CONFIRM_PERSON:
+            confirmed = sig.affirmative or sig.permission_granted or sig.identity_yes
+            return CallStep.HOW_ARE_YOU if confirmed else CallStep.CONFIRM_PERSON
+        if self.step == CallStep.HOW_ARE_YOU:
+            return CallStep.OFFER
+        if self.step == CallStep.OFFER:
+            return CallStep.OFFER_AGAIN if sig.negative else CallStep.EXPLAIN
+        if self.step == CallStep.OFFER_AGAIN:
+            return CallStep.DECLINED if sig.negative else CallStep.EXPLAIN
+        if self.step == CallStep.EXPLAIN and not sig.negative:
+            wants_more = sig.question or sig.asks_pitch
+            if self.explanations >= MAX_EXPLANATIONS or (self.explanations and not wants_more):
+                return CallStep.PRICE
+        return self.step
+
+    def goal_for_step(self, name: str, company: str) -> str:
+        """The model's instruction for the current step, while the call is on its fixed path."""
+        plan = CALL_FLOW[self.step]
+        return plan.goal.format(name=name, company=company) if plan.stage == self.current_stage else ""
+
+    def line_for_step(self, name: str) -> Optional[str]:
+        plan = CALL_FLOW[self.step]
+        return plan.line.format(name=name) if plan.line and plan.stage == self.current_stage else None
 
     def apply(self, sig: TurnSignals) -> Optional[str]:
         """Applies the plan's transition rules. Returns a reason when the stage changed."""
@@ -175,16 +290,16 @@ class StageManager:
         if stage == SalesStage.OPENING:
             if sig.permission_denied:
                 return None  # engine closes politely / offers callback
-            if sig.permission_granted or sig.asks_price or sig.asks_pitch or sig.needs:
-                self.permission_granted = True
-                self.transition_to(SalesStage.DISCOVERY, "Permission given")
-            elif sig.affirmative:
-                if self.identity_confirmed:
-                    self.permission_granted = True
-                    self.transition_to(SalesStage.DISCOVERY, "Permission given")
-                else:
-                    self.identity_confirmed = True
-            return self._changed(before, "Permission given")
+            if sig.wants_price:
+                self.step = CallStep.PRICE
+            elif sig.buying_signal:
+                self.step = CallStep.NEXT_STEP
+            elif sig.asks_price or sig.asks_pitch or sig.needs:
+                self.step = CallStep.EXPLAIN
+            else:
+                self.step = self._next_step(sig)
+            self.transition_to(CALL_FLOW[self.step].stage, f"Call step: {self.step.value}")
+            return self._changed(before, f"Call step: {self.step.value}")
 
         if sig.objection and stage != SalesStage.OPENING:
             count = self.handled_objections.get(sig.objection, 0) + 1
@@ -196,23 +311,33 @@ class StageManager:
             return self._changed(before, "objection")
 
         if sig.buying_signal and stage != SalesStage.COMPLETED:
+            if stage == SalesStage.PITCH and self.explanations:
+                sig.wants_price = True  # they have heard what it does, so the next thing they hear is the price
+            self.step = CallStep.PRICE if sig.wants_price else CallStep.NEXT_STEP
             self.transition_to(SalesStage.CLOSE_NEXT_STEP, "Buying signal")
             return self._changed(before, "buying signal")
 
         if stage == SalesStage.DISCOVERY:
+            self.discovery_turns += 1
+            nxt = SalesStage.NEED_IDENTIFICATION if self.confirmed_needs else SalesStage.PITCH
             if len(self.confirmed_needs) >= 2:
                 self.transition_to(SalesStage.NEED_IDENTIFICATION, "2+ needs captured")
             elif sig.asks_price or sig.asks_pitch:
-                nxt = SalesStage.NEED_IDENTIFICATION if self.confirmed_needs else SalesStage.PITCH
                 self.transition_to(nxt, "Customer pushed for the pitch")
+            elif self.discovery_turns >= MAX_DISCOVERY_TURNS:
+                self.transition_to(nxt, "Discovery has run long enough")
         elif stage == SalesStage.NEED_IDENTIFICATION:
             if sig.affirmative or sig.asks_price or sig.asks_pitch:
                 self.transition_to(SalesStage.PITCH, "Customer agreed with the summary")
             elif sig.negative:
                 self.transition_to(SalesStage.DISCOVERY, "Summary rejected; rediscover")
         elif stage == SalesStage.PITCH:
-            if new_needs:
-                self.transition_to(SalesStage.DISCOVERY, "New need raised during pitch")
+            self.step = CallStep.EXPLAIN
+            if sig.wants_price or self._next_step(sig) == CallStep.PRICE:
+                reason = "Customer asked the price" if sig.wants_price else "Explained enough: give the price"
+                sig.wants_price = True
+                self.step = CallStep.PRICE
+                self.transition_to(SalesStage.CLOSE_NEXT_STEP, reason)
         elif stage == SalesStage.OBJECTION_HANDLING:
             if sig.affirmative or sig.asks_price or sig.question:
                 back = self.stage_before_objection
@@ -227,12 +352,13 @@ class StageManager:
     def get_stage_guidance(self) -> str:
         """Brief goal for the turn prompt."""
         guidance = {
-            SalesStage.OPENING: "Goal: Confirm right person, then ask for 2 minutes of their time.",
+            SalesStage.OPENING: "Goal: Confirm the right person, greet them, then say what the company does and ask if they want this.",
             SalesStage.DISCOVERY: "Goal: Learn their situation, current solution and pain points. One question.",
             SalesStage.NEED_IDENTIFICATION: "Goal: State the customer's main need in one short sentence and ask if correct.",
-            SalesStage.PITCH: "Goal: Match 1-2 features to the confirmed need. Keep it under 25 words.",
+            SalesStage.PITCH: "Goal: Explain briefly what the product does for them.",
             SalesStage.OBJECTION_HANDLING: "Goal: Answer with the approved playbook for this objection. Never argue.",
-            SalesStage.CLOSE_NEXT_STEP: "Goal: Offer one clear next step: payment link, demo booking, expert or callback.",
+            SalesStage.CLOSE_NEXT_STEP: "Goal: Move to one clear next step. Offer a live demo first; offer the payment link if they want to buy. "
+                                         "Never ask what else they want to know.",
             SalesStage.COMPLETED: "Goal: The action is confirmed. Thank them and close in one sentence.",
         }
         return guidance.get(self.current_stage, "")

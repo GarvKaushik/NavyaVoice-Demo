@@ -100,6 +100,8 @@ class CostCalculator:
     @classmethod
     def tts_rate_per_10k(cls, on: Optional[date] = None) -> float:
         s = get_settings()
+        if s.TTS_PROVIDER in ("piper", "server"):
+            return 0.0  # runs on our own machine or GPU; its cost is infrastructure, not per character
         on = on or date.today()
         if on <= s.BULBUL_TTS_PROMO_UNTIL:
             return s.BULBUL_TTS_PROMO_RATE_PER_10K_CHARS_INR

@@ -6,15 +6,16 @@
 
 Per call: explicit dispatch with metadata (lead, campaign, phone) -> dial out over
 the Plivo SIP trunk -> answering-machine detection -> pre-rendered disclosure ->
-Sarvam streaming STT (Hinglish codemix, 8 kHz) -> DialogueEngine (fast path,
-stage prompt, LLM + tools, output guard) -> Bulbul v4 Flash at 8 kHz with phrase
-and sentence caches -> outcome, cost ledger and events written to Postgres.
+STT (STT service, or Sarvam streaming) -> DialogueEngine (fast path, stage prompt,
+LLM + tools, output guard) -> TTS (TTS service, Piper, OpenAI, or Bulbul v4 Flash) with
+phrase and sentence caches -> outcome, cost ledger and events written to Postgres.
 """
 
 import asyncio
 import json
 import logging
 import statistics
+import threading
 import time
 import uuid
 from typing import AsyncIterable, Optional
@@ -38,17 +39,19 @@ from livekit.agents import (
     stt as lk_stt,
     tts as lk_tts,
 )
-from livekit.plugins import openai as lk_openai, sarvam, silero
+from livekit.plugins import openai as lk_openai, silero
 
 from agent.dialogue import DialogueEngine
-from agent.knowledge import load_knowledge
-from agent.tools import CallIdentity
+from agent.knowledge import KnowledgeUnavailable, load_knowledge
+from agent.tools import CONFIRMED_OUTCOMES, CallIdentity
 from config.settings import get_settings
+from database.models import DEFAULT_CLIENT_ID
 from guardrails.output_guard import SentenceBuffer
-from llm.client import LLMClient
+from llm.client import LLMClient, realtime_endpoints
 from observability import metrics as m
 from observability.call_recorder import CallRecorder
 from observability.logging_setup import setup_logging
+from observability.recording import start_recording
 from observability.tracing import setup_tracing
 from speech.lexicon import KEYTERMS
 from speech.normalizer import HinglishNormalizer
@@ -56,6 +59,11 @@ from speech.phrase_cache import PreRenderedPhraseCache as P, SentenceAudioCache
 
 logger = logging.getLogger("agent.worker")
 settings = get_settings()
+
+# Plugins register at import, on the main thread. Without Sarvam selected, its plugin is never loaded.
+if (settings.STT_PROVIDER == "sarvam" or settings.TTS_PROVIDER == "sarvam"
+        or (settings.TTS_PROVIDER == "server" and settings.TTS_FALLBACK_TO_SARVAM)):
+    from livekit.plugins import sarvam
 
 FRAME_MS = 20
 VAD_MIN_SILENCE = 0.2  # seconds of silence before the VAD reports end of speech
@@ -71,7 +79,7 @@ def pcm_frames(pcm: bytes, sample_rate: int):
         yield rtc.AudioFrame(data=chunk, sample_rate=sample_rate, num_channels=1, samples_per_channel=len(chunk) // 2)
 
 
-def build_stt() -> lk_stt.STT:
+def build_stt(extra_terms: Optional[list] = None) -> lk_stt.STT:
     """Sarvam streaming STT with client flush.
 
     Local VAD decides end of turn and flushes the stream; Sarvam returns the final
@@ -82,20 +90,43 @@ def build_stt() -> lk_stt.STT:
     """
     from dataclasses import replace
 
+    if settings.STT_PROVIDER != "sarvam":
+        from speech.local_stt import LocalSTT
+
+        return LocalSTT(settings.STT_PROVIDER)
     stt = sarvam.STT(language=settings.SARVAM_STT_LANGUAGE_CODE, model=settings.SARVAM_STT_MODEL,
                      mode=settings.SARVAM_STT_MODE, api_key=settings.SARVAM_API_KEY,
                      sample_rate=settings.SARVAM_STT_SAMPLE_RATE, flush_signal=True,
-                     prompt="Product names: " + ", ".join(KEYTERMS))
+                     prompt="Product names: " + ", ".join(extra_terms or KEYTERMS))
     stt._capabilities = replace(stt.capabilities, manual_flush=True)
     return stt
 
 
-def build_tts() -> lk_tts.TTS:
-    def make(model: str, speaker: str) -> sarvam.TTS:
+def build_tts(voice_id: Optional[str] = None) -> lk_tts.TTS:
+    def make(model: str, speaker: str) -> "sarvam.TTS":
         return sarvam.TTS(target_language_code="hi-IN", model=model, speaker=speaker,
                           speech_sample_rate=settings.BULBUL_TTS_SAMPLE_RATE, pace=settings.BULBUL_TTS_PACE,
                           api_key=settings.SARVAM_API_KEY, output_audio_codec="linear16", enable_preprocessing=False)
-    primary = make(settings.BULBUL_TTS_MODEL, settings.BULBUL_TTS_VOICE_ID)
+
+    if settings.TTS_PROVIDER == "server":
+        from speech.server_tts import ServerTTS
+
+        service = ServerTTS()
+        if settings.TTS_FALLBACK_TO_SARVAM and settings.sarvam_configured:
+            return lk_tts.FallbackAdapter([service, make(settings.BULBUL_TTS_MODEL, settings.BULBUL_TTS_VOICE_ID)],
+                                          sample_rate=settings.TTS_SERVER_SAMPLE_RATE)
+        return service
+    if settings.TTS_PROVIDER == "piper":
+        from speech.piper_tts import PiperLiveTTS
+
+        return PiperLiveTTS()
+    if settings.TTS_PROVIDER == "openai":
+        extra = {"instructions": settings.OPENAI_TTS_INSTRUCTIONS} if settings.OPENAI_TTS_MODEL == "gpt-4o-mini-tts" else {}
+        return lk_openai.TTS(model=settings.OPENAI_TTS_MODEL, voice=voice_id or settings.OPENAI_TTS_VOICE, speed=settings.OPENAI_TTS_SPEED,
+                             api_key=settings.OPENAI_API_KEY, base_url=settings.OPENAI_BASE_URL,
+                             sample_rate=settings.OPENAI_TTS_SAMPLE_RATE, response_format="pcm", **extra)
+
+    primary = make(settings.BULBUL_TTS_MODEL, voice_id or settings.BULBUL_TTS_VOICE_ID)
     if settings.BULBUL_TTS_FALLBACK_MODEL and settings.BULBUL_TTS_FALLBACK_MODEL != settings.BULBUL_TTS_MODEL:
         fallback = make(settings.BULBUL_TTS_FALLBACK_MODEL, settings.BULBUL_TTS_FALLBACK_VOICE_ID)
         return lk_tts.FallbackAdapter([primary, fallback], sample_rate=settings.BULBUL_TTS_SAMPLE_RATE)
@@ -105,8 +136,8 @@ def build_tts() -> lk_tts.TTS:
 def placeholder_llm() -> lk_llm.LLM:
     """The session requires an LLM object; replies come from DialogueEngine via llm_node.
     It is also what answering-machine detection classifies greetings with."""
-    return lk_openai.LLM(model=settings.REALTIME_LLM_MODEL, base_url=settings.REALTIME_LLM_BASE_URL,
-                         api_key=settings.REALTIME_LLM_API_KEY, temperature=0.0)
+    endpoint = realtime_endpoints()[0]
+    return lk_openai.LLM(model=endpoint.model, base_url=endpoint.base_url, api_key=endpoint.api_key, temperature=0.0)
 
 
 class SalesAgent(Agent):
@@ -128,6 +159,7 @@ class SalesAgent(Agent):
     async def on_user_turn_completed(self, turn_ctx: lk_llm.ChatContext, new_message: lk_llm.ChatMessage) -> None:
         text = new_message.text_content or ""
         self.call.turn_started = time.monotonic()
+        self.call.tts_started = None
         self.call.silence_prompts = 0
         scripted = await self.engine.pre_turn(text, agent_was_speaking=self.call.agent_was_speaking_at_user_start)
         if scripted is None:
@@ -183,7 +215,7 @@ class SalesAgent(Agent):
             yield frame
 
     async def _speak_sentences(self, sentences: AsyncIterable[str]) -> AsyncIterable[rtc.AudioFrame]:
-        sample_rate = settings.BULBUL_TTS_SAMPLE_RATE
+        sample_rate = settings.tts_sample_rate
         async for sentence in sentences:
             sentence = sentence.strip()
             if not any(ch.isalnum() for ch in sentence):
@@ -198,12 +230,17 @@ class SalesAgent(Agent):
                 continue
             spoken = HinglishNormalizer.normalize(sentence)
             self.call.recorder.add_tts_chars(len(spoken), cached=False)
+            self.call.tts_started = self.call.tts_started or time.monotonic()
             collected = bytearray()
             async for ev in self.session.tts.synthesize(spoken):
                 self.call.on_first_audio()
                 collected += bytes(ev.frame.data)
                 yield ev.frame
-            if self.call.cacheable(sentence):
+            if getattr(self.session.tts, "last_was_fallback", False):
+                continue  # spoken by the TTS service's fallback voice; the cache holds the main voice only
+            if phrase_id:
+                self.phrases.save(phrase_id, bytes(collected))  # a client's own lines are rendered once, then reused
+            elif self.call.cacheable(sentence):
                 self.sentence_cache.put(sentence, bytes(collected))
 
 
@@ -218,15 +255,28 @@ class CallSession:
         self.session: Optional[AgentSession] = None
         self.recorder = CallRecorder(identity, console=console)
         self.turn_started: Optional[float] = None
+        self.tts_started: Optional[float] = None
         self.latencies_ms: list = []
         self.last_eou_delay: float = 0.0
         self.agent_was_speaking_at_user_start = False
         self.silence_prompts = 0
         self.agent_speaking_since: Optional[float] = None
         self.agent_talk_seconds = 0.0
-        self.started = time.monotonic()
+        self.started: Optional[float] = time.monotonic() if console else None  # set when the customer answers
         self.false_interruptions = 0
+        self.time_limit: Optional[asyncio.Task] = None
         self._ending = False
+
+    def mark_answered(self) -> None:
+        """Duration and billing count from the moment the customer picks up."""
+        self.started = time.monotonic()
+        asyncio.create_task(self.recorder.mark_answered())
+        asyncio.create_task(self._start_recording())
+
+    async def _start_recording(self) -> None:
+        key = await start_recording(self.ctx.api, self.ctx.room.name, self.identity.client_id, self.identity.call_id)
+        if key:
+            await self.recorder.set_recording(key)
 
     def cacheable(self, sentence: str) -> bool:
         """Only generic sentences are cached on disk: no digits, no customer name."""
@@ -237,11 +287,19 @@ class CallSession:
         if self.turn_started is not None:
             latency = (time.monotonic() - self.turn_started) * 1000 + self.last_eou_delay * 1000
             self.latencies_ms.append(latency)
+            stt_ms = getattr(self.session.stt, "last_decode_ms", None) if self.session else None
+            tts_ms = (time.monotonic() - self.tts_started) * 1000 if self.tts_started else None
+            self.tts_started = None
             m.observe_voice_to_voice(latency / 1000)
             self.recorder.add_event("latency", {"voice_to_voice_ms": round(latency),
                                                 "llm_ttft_ms": self.engine.last_turn_metrics.get("llm_ttft_ms"),
-                                                "eou_delay_ms": round(self.last_eou_delay * 1000)})
-            logger.info(f"turn latency ~{latency:.0f} ms (eou {self.last_eou_delay * 1000:.0f} ms)")
+                                                "eou_delay_ms": round(self.last_eou_delay * 1000),
+                                                "stt_ms": stt_ms and round(stt_ms), "tts_first_audio_ms": tts_ms and round(tts_ms)})
+            ttft = self.engine.last_turn_metrics.get("llm_ttft_ms")
+            logger.info(f"turn latency ~{latency:.0f} ms (eou {self.last_eou_delay * 1000:.0f} ms, "
+                        f"stt {f'{stt_ms:.0f} ms' if stt_ms else 'streaming'}, "
+                        f"llm first token {f'{ttft:.0f} ms' if ttft else 'scripted'}, "
+                        f"tts first audio {f'{tts_ms:.0f} ms' if tts_ms else 'cached'})")
             self.turn_started = None
 
     def apply_endpointing(self) -> None:
@@ -269,6 +327,7 @@ class CallSession:
 
         @session.on("user_state_changed")
         def _on_user_state(ev):
+            logger.debug(f"user state: {ev.old_state} -> {ev.new_state}")
             if ev.new_state == "speaking":
                 self.agent_was_speaking_at_user_start = session.agent_state == "speaking"
             elif ev.new_state == "away" and not self._ending:
@@ -276,6 +335,7 @@ class CallSession:
 
         @session.on("agent_state_changed")
         def _on_agent_state(ev):
+            logger.debug(f"agent state: {ev.old_state} -> {ev.new_state}")
             now = time.monotonic()
             if ev.new_state == "speaking":
                 self.agent_speaking_since = now
@@ -310,21 +370,41 @@ class CallSession:
             self.session.say(self.engine.phrases.get_text(P.SILENCE_REPROMPT))
             return
         self._ending = True
-        await self.engine.tools.tool_schedule_callback("2 ghante baad")
-        handle = self.session.say(self.engine.phrases.get_text(P.SILENCE_CLOSE), allow_interruptions=False)
+        confirmed = self.engine.outcome in CONFIRMED_OUTCOMES  # a booked demo stays booked, with no extra callback
+        if not confirmed:
+            await self.engine.tools.tool_schedule_callback("2 ghante baad")
+        closing = P.GOODBYE if confirmed else P.SILENCE_CLOSE
+        handle = self.session.say(self.engine.phrases.get_text(closing), allow_interruptions=False)
         await handle.wait_for_playout()
-        self.engine.tools.outcome = "no_response"
+        if not confirmed:
+            self.engine.tools.outcome = "no_response"
+        await self.hangup()
+
+    async def end_after(self, seconds: float) -> None:
+        """A time-limited call (the website demo) says goodbye and hangs up when its time is up."""
+        await asyncio.sleep(seconds)
+        if self._ending:
+            return
+        self._ending = True
+        try:
+            handle = self.session.say(self.engine.phrases.get_text(P.GOODBYE), allow_interruptions=False)
+            await asyncio.wait_for(handle.wait_for_playout(), timeout=8)
+        except Exception as e:
+            logger.debug(f"goodbye before the time limit: {e!r}")
         await self.hangup()
 
     async def fail_gracefully(self, reason: str) -> None:
         self._ending = True
+        confirmed = self.engine.outcome in CONFIRMED_OUTCOMES
         try:
-            handle = self.session.say(self.engine.phrases.get_text(P.NETWORK_ISSUE_FALLBACK), allow_interruptions=False)
+            closing = P.GOODBYE if confirmed else P.NETWORK_ISSUE_FALLBACK
+            handle = self.session.say(self.engine.phrases.get_text(closing), allow_interruptions=False)
             await asyncio.wait_for(handle.wait_for_playout(), timeout=8)
         except Exception:
             pass
-        await self.engine.tools.tool_schedule_callback("2 ghante baad")
-        self.engine.tools.outcome = "dropped"
+        if not confirmed:
+            await self.engine.tools.tool_schedule_callback("2 ghante baad")
+            self.engine.tools.outcome = "dropped"
         self.recorder.error = reason
         await self.hangup()
 
@@ -361,7 +441,7 @@ class CallSession:
 
     async def hangup(self) -> None:
         self._ending = True
-        if self.console:
+        if self.ctx.is_fake_job():
             logger.info(f"Call ended: outcome={self.engine.outcome}")
             await self.finalize()
             return
@@ -375,7 +455,7 @@ class CallSession:
         if self.recorder.finalized:
             return
         await self.engine.drain_observer(timeout=2)
-        duration = time.monotonic() - self.started
+        duration = time.monotonic() - self.started if self.started is not None else 0.0
         lat = sorted(self.latencies_ms)
         self.recorder.p50 = statistics.median(lat) if lat else None
         self.recorder.p95 = lat[min(len(lat) - 1, int(len(lat) * 0.95))] if lat else None
@@ -396,10 +476,13 @@ server = AgentServer(
 def prewarm(proc: JobProcess) -> None:
     proc.userdata["vad"] = silero.VAD.load(min_silence_duration=VAD_MIN_SILENCE,
                                            prefix_padding_duration=settings.SARVAM_VAD_PRE_ROLL_MS / 1000)
-    phrases = P()
-    phrases.load()
-    proc.userdata["phrases"] = phrases
-    proc.userdata["sentence_cache"] = SentenceAudioCache()
+    proc.userdata["phrases"] = {}
+    proc.userdata["sentence_cache"] = {settings.tts_voice: SentenceAudioCache()}
+    if settings.TTS_PROVIDER == "piper":
+        from speech.piper_tts import load_voice
+
+        # In the background: it can take longer than the time a worker process is allowed to start up
+        threading.Thread(target=load_voice, daemon=True).start()
 
 
 server.setup_fnc = prewarm
@@ -413,7 +496,7 @@ def _identity_from(ctx: JobContext) -> tuple:
             meta = json.loads(raw)
         except json.JSONDecodeError:
             logger.warning(f"Job metadata is not JSON: {raw[:100]}")
-    console = ctx.is_fake_job()
+    console = ctx.is_fake_job() or bool(meta.get("test_call"))  # a browser test call has no phone leg and is not billed
     identity = CallIdentity(
         call_id=meta.get("call_id") or ctx.room.name or f"console_{uuid.uuid4().hex[:8]}",
         lead_id=meta.get("lead_id", "LEAD-TEST-001"),
@@ -422,6 +505,7 @@ def _identity_from(ctx: JobContext) -> tuple:
         customer_name=meta.get("customer_name", "Rajesh"),
         segment=meta.get("segment"),
         timezone=meta.get("timezone", settings.TIMEZONE),
+        client_id=meta.get("client_id", DEFAULT_CLIENT_ID),
     )
     return identity, meta, console
 
@@ -433,23 +517,44 @@ async def entrypoint(ctx: JobContext) -> None:
     identity, meta, console = _identity_from(ctx)
     ctx.log_context_fields = {"call_id": identity.call_id, "lead_id": identity.lead_id}
 
-    knowledge = await load_knowledge(identity.campaign_id)
+    try:
+        knowledge = await load_knowledge(identity.campaign_id)
+    except KnowledgeUnavailable as e:
+        logger.error(f"Not dialing {identity.call_id}: {e}")
+        await CallRecorder(identity, console=console).finalize_unanswered("failed", str(e))
+        ctx.shutdown(reason="no_approved_content")
+        return
     llm_client = LLMClient.realtime()
     engine = DialogueEngine(identity, knowledge, llm_client, observer_llm=llm_client)
+    # Each client's phrases and each voice's sentence cache load once per worker process
+    phrase_key = (knowledge.voice_id, knowledge.company_name, knowledge.persona_name, knowledge.complaint_contact)
+    phrases = ctx.proc.userdata["phrases"].get(phrase_key)
+    if phrases is None:
+        engine.phrases.load()
+        phrases = ctx.proc.userdata["phrases"][phrase_key] = engine.phrases
+    engine.phrases = phrases
+    sentence_cache = ctx.proc.userdata["sentence_cache"].setdefault(knowledge.voice_id,
+                                                                    SentenceAudioCache(voice=knowledge.voice_id))
     call = CallSession(ctx, identity, engine, console)
     engine._emit = call.recorder.add_event
     engine.late_intent_handler = call.late_intent
     ctx.add_shutdown_callback(call.finalize)
     ctx.add_shutdown_callback(llm_client.aclose)
 
+    tts = build_tts(knowledge.voice_id)
+    if settings.TTS_PROVIDER == "server":
+        ctx.add_shutdown_callback(tts.aclose)  # closes the call's connection to the TTS service
     session = AgentSession(
-        stt=build_stt(),
-        tts=build_tts(),
+        stt=build_stt([knowledge.company_name] + sorted({c.name for c in knowledge.catalog.values()})),
+        tts=tts,
         llm=placeholder_llm(),
         vad=ctx.proc.userdata["vad"],
         turn_handling={
-            # Local VAD ends the turn and flushes Sarvam (benchmarked ~430 ms vs ~930 ms with "stt" endpointing)
+            # Local VAD ends the turn and flushes the STT (on Sarvam, benchmarked ~430 ms vs ~930 ms with "stt" endpointing)
             "turn_detection": "vad",
+            # The reply is built from the engine's history, which is updated in on_user_turn_completed.
+            # Generating earlier would answer the previous turn.
+            "preemptive_generation": {"enabled": False},
             "endpointing": {"mode": "fixed", "min_delay": 0.1, "max_delay": 2.5},
             "interruption": {
                 "enabled": True,
@@ -460,19 +565,23 @@ async def entrypoint(ctx: JobContext) -> None:
                 "false_interruption_timeout": 1.5,
             },
         },
-        user_away_timeout=6.0,
+        # A slow local decode must not look like a silent customer
+        user_away_timeout=6.0 if settings.STT_PROVIDER == "sarvam" else 6.0 + settings.STT_SERVER_TIMEOUT_SECONDS,
     )
     call.session = session
     call.wire_events(session)
-    agent = SalesAgent(engine, ctx.proc.userdata["phrases"], ctx.proc.userdata["sentence_cache"], call)
+    agent = SalesAgent(engine, phrases, sentence_cache, call)
 
     await ctx.connect()
     if m.GAUGE_ACTIVE_CALLS:
         m.GAUGE_ACTIVE_CALLS.inc()
-    await call.recorder.start(knowledge.script_version, meta.get("caller_id") or settings.PLIVO_CALLER_ID_PROMOTIONAL)
+    await call.recorder.start(knowledge.script_version, meta.get("caller_id") or settings.PLIVO_CALLER_ID_PROMOTIONAL,
+                              knowledge.voice_id)
 
     if console:
         await session.start(agent=agent, room=ctx.room)
+        if meta.get("max_seconds"):
+            call.time_limit = asyncio.create_task(call.end_after(float(meta["max_seconds"])))
         return
 
     # Outbound: dial the customer over the Plivo SIP trunk, with answering-machine detection
@@ -483,13 +592,14 @@ async def entrypoint(ctx: JobContext) -> None:
         return
 
     await session.start(agent=agent, room=ctx.room)
-    outcome = await dial_customer(ctx, session, identity, meta)
+    outcome = await dial_customer(ctx, session, identity, meta, call)
     if outcome != "answered":
         await call.recorder.finalize_unanswered(outcome)
         await call.hangup()
 
 
-async def dial_customer(ctx: JobContext, session: AgentSession, identity: CallIdentity, meta: dict) -> str:
+async def dial_customer(ctx: JobContext, session: AgentSession, identity: CallIdentity, meta: dict,
+                        call: CallSession) -> str:
     """Creates the SIP participant; returns 'answered' or an unanswered outcome."""
     from livekit.agents import AMD
 
@@ -505,7 +615,8 @@ async def dial_customer(ctx: JobContext, session: AgentSession, identity: CallId
     try:
         async with AMD(session, llm=None, stt=None, ivr_detection=False, interrupt_on_machine=True,
                        participant_identity="caller", suppress_compatibility_warning=True) as detector:
-            await ctx.api.sip.create_sip_participant(request)
+            await ctx.api.sip.create_sip_participant(request)  # returns when the customer answers
+            call.mark_answered()
             result = await detector.execute()
         category = str(getattr(result, "category", "human")).lower()
         if "machine" in category:

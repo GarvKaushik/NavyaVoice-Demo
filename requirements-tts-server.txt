@@ -1,0 +1,8 @@
+# TTS service on a GPU machine: Linux, NVIDIA driver with CUDA 12.8, Python 3.10-3.12.
+# Install on top of requirements.txt and requirements-local.txt:
+#   pip install -r requirements-tts-server.txt --extra-index-url https://download.pytorch.org/whl/cu128
+# Svara runs its model on the GPU only with a CUDA build of llama-cpp-python:
+#   CMAKE_ARGS="-DGGML_CUDA=on" pip install --force-reinstall --no-deps --no-cache-dir llama-cpp-python
+maya3 @ git+https://github.com/MayaResearch/maya2-native   # Maya 2 Native: Apache-2.0; its Mimi codec is CC-BY-4.0 (attribution)
+llama-cpp-python>=0.3.0      # Svara fallback (GGUF model)
+snac>=1.2.1                  # Svara audio decoder

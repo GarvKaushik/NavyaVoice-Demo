@@ -4,8 +4,9 @@ Holds the campaign's catalog slice, offers, policies, availability and the
 approved playbook. Tools read from this snapshot, so exact values are
 deterministic and nothing on the per-turn path touches the database.
 
-Loads from Postgres when available; otherwise falls back to the approved
-seed content below (the same content `database/seed_data.py` writes).
+Loads from Postgres. Outside production, the seed campaign falls back to the
+approved seed content below (the same content `database/seed_data.py` writes).
+No other campaign ever does: a client's lead must never hear another product's pitch.
 """
 
 import logging
@@ -13,7 +14,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
+from config.settings import get_settings
+from database.models import DEFAULT_CLIENT_ID
+
 logger = logging.getLogger(__name__)
+
+
+class KnowledgeUnavailable(RuntimeError):
+    """This campaign's approved content could not be loaded, so it must not be called."""
 
 
 @dataclass
@@ -72,6 +80,14 @@ class CampaignKnowledge:
     faqs: List[Dict[str, str]] = field(default_factory=list)
     source: str = "seed"
     primary_sku: Optional[str] = None  # first SKU in the campaign's product list
+    client_id: str = DEFAULT_CLIENT_ID
+    company_name: str = ""
+    persona_name: str = ""
+    complaint_contact: str = ""
+    voice_id: str = ""
+    caller_id: Optional[str] = None
+    transfer_numbers: List[str] = field(default_factory=list)
+    payment_links_enabled: bool = True
 
     def product_names(self) -> List[str]:
         return sorted({f"{c.name} ({c.sku}, {c.plan})" for c in self.catalog.values()})
@@ -88,11 +104,11 @@ class CampaignKnowledge:
 # Approved seed content
 # ------------------------------------------------------------------------------
 SEED_CAMPAIGN_ID = "CAMP-REENGAGE-Q4"
-SEED_SCRIPT_VERSION = "v1.0-hinglish-sales"
+SEED_SCRIPT_VERSION = "v1.1-hinglish-sales"
 
 SEED_PRODUCT_INTRO = (
-    "Nexus CRM Pro ek AI calling aur CRM software hai: yeh aapki team ke leads ko khud call karta hai, "
-    "har call ki details apne aap CRM mein update karta hai, aur follow-up yaad dilata hai."
+    "Nexus CRM Pro ek AI calling aur CRM software hai: yeh aapke leads ko khud call karta hai "
+    "aur har call ki details CRM mein update karta hai."
 )
 
 SEED_CATALOG = [
@@ -122,9 +138,8 @@ SEED_AVAILABILITY = [
 
 SEED_STAGE_PROMPTS: Dict[str, str] = {
     "OPENING": (
-        "Disclosure ho chuka hai. Confirm karein ki sahi vyakti se baat ho rahi hai. Phir ek line mein batayein ki "
-        "aap kis product ke liye call kar rahi hain (PRODUCT INTRO se, apne shabdon mein) aur 2 minute ki permission "
-        "maangein. Permission na mile to politely call khatam karein ya callback ka samay poochein."
+        "Disclosure ho chuka hai. Confirm karein ki sahi vyakti se baat ho rahi hai, haal-chaal poochein, phir ek line "
+        "mein batayein ki company kya karti hai aur poochein ki kya unhe aisa product chahiye."
     ),
     "DISCOVERY": (
         "Customer ki situation samjhein: abhi sales leads ko kaise call karte hain, kaun sa tool use karte hain, "
@@ -134,9 +149,9 @@ SEED_STAGE_PROMPTS: Dict[str, str] = {
         "Customer ki main need ko ek chhote sentence mein wapas confirm karein aur poochein ki kya yeh sahi hai."
     ),
     "PITCH": (
-        "Pehle product ka naam lekar ek simple line mein batayein ki yeh kya hai (PRODUCT INTRO). Phir sirf 1-2 "
-        "features jo confirm ki gayi need ko solve karein. Price tabhi batayein jab customer pooche, aur hamesha "
-        "get_price tool se. Offer ya discount ka zikr tabhi karein jab customer pooche ya price ko mehenga bole."
+        "Product ka naam lekar ek simple line mein batayein ki yeh kya hai aur customer ke kaam ka kaise hai (PRODUCT INTRO). "
+        "Agli baar koi nayi baat batayein, wahi line mat dohrayein. Price khud mat batayein. "
+        "Offer ya discount ka zikr tabhi karein jab customer pooche ya price ko mehenga bole."
     ),
     "OBJECTION_HANDLING": (
         "Objection ko respect karein aur neeche diya approved answer use karein. Kabhi argue mat karein."
@@ -148,25 +163,25 @@ SEED_STAGE_PROMPTS: Dict[str, str] = {
 }
 
 SEED_OBJECTIONS: Dict[str, str] = {
-    "price": (
-        "Main samajh sakti hoon sir. Lekin hamara standard Pro plan sirf ₹1,499 per month hai, "
-        "aur aaj special offer mein yeh aapko sirf ₹1,199 mein mil jayega."
+    "price": "Samajh sakti hoon sir. Aaj offer mein yeh sirf ₹1,199 hai, kya link bhej doon?",
+    "timing": "Koi baat nahi sir. Aapko kab call karna theek rahega?",
+    "trust": "Bilkul sir. Data India mein hi rehta hai, aur 7-day money-back guarantee hai, koi lock-in nahi.",
+    "competitor": "Aapka software accha hai sir. Hum Hinglish calling aur automatic CRM entry bhi dete hain.",
+    "need": "Daily 20 se zyada calls par yeh kaafi samay bachata hai sir. Chhota demo dikha doon?",
+}
+
+
+# Starting script for a new client's campaigns; an admin adds product details and objection answers.
+DEFAULT_STAGE_PROMPTS: Dict[str, str] = {
+    "OPENING": SEED_STAGE_PROMPTS["OPENING"],
+    "DISCOVERY": (
+        "Customer ki situation samjhein: abhi yeh kaam kaise karte hain aur kya pareshani aati hai. "
+        "Ek baar mein sirf ek sawaal."
     ),
-    "timing": (
-        "Koi baat nahi sir, main samajh sakti hoon aap busy hain. Aapko kab call karna theek rahega?"
-    ),
-    "trust": (
-        "Bilkul genuine concern hai sir. Hamare servers Mumbai mein hain, data India mein hi rehta hai, "
-        "aur hamare paas 7-day money-back guarantee hai bina kisi lock-in ke."
-    ),
-    "competitor": (
-        "Aapka current software accha hai sir, lekin hum specialized Hinglish voice calling "
-        "aur automatic CRM entry dete hain, jo manual kaam bachata hai."
-    ),
-    "need": (
-        "Bilkul sir, agar aapki team daily 20 se zyada calls karti hai, toh hamara agent "
-        "unka kaafi samay bacha sakta hai. Kya main ek chhota demo dikha doon?"
-    ),
+    "NEED_IDENTIFICATION": SEED_STAGE_PROMPTS["NEED_IDENTIFICATION"],
+    "PITCH": SEED_STAGE_PROMPTS["PITCH"],
+    "OBJECTION_HANDLING": SEED_STAGE_PROMPTS["OBJECTION_HANDLING"],
+    "CLOSE_NEXT_STEP": SEED_STAGE_PROMPTS["CLOSE_NEXT_STEP"],
 }
 
 
@@ -178,6 +193,7 @@ def seed_offers(now: Optional[datetime] = None) -> List[OfferEntry]:
 
 
 def seed_knowledge(campaign_id: str = SEED_CAMPAIGN_ID) -> CampaignKnowledge:
+    s = get_settings()
     return CampaignKnowledge(
         campaign_id=campaign_id,
         script_version=SEED_SCRIPT_VERSION,
@@ -189,22 +205,34 @@ def seed_knowledge(campaign_id: str = SEED_CAMPAIGN_ID) -> CampaignKnowledge:
         objection_playbooks=dict(SEED_OBJECTIONS),
         source="seed",
         primary_sku=SEED_CATALOG[0].sku,
+        company_name=s.COMPANY_NAME,
+        persona_name=s.AGENT_PERSONA_NAME,
+        complaint_contact=s.COMPLAINT_CONTACT,
+        voice_id=s.tts_voice,
+        transfer_numbers=s.human_transfer_numbers,
     )
 
 
 async def load_knowledge(campaign_id: str) -> CampaignKnowledge:
-    """Loads the campaign slice from Postgres; falls back to seed content if unavailable."""
+    """Loads the campaign slice and its client's identity from Postgres."""
+    s = get_settings()
     try:
         from sqlalchemy import select
         from database.session import get_read_sessionmaker
-        from database.models import Availability, Campaign, CatalogItem, Offer, Playbook, Policy, utcnow
+        from database.models import (Availability, Campaign, CatalogItem, Client, FAQ, Offer, Playbook, Policy,
+                                     utcnow)
 
         now = utcnow()
         async with get_read_sessionmaker()() as db:
             campaign = await db.get(Campaign, campaign_id)
-            skus = list(campaign.product_skus) if campaign and campaign.product_skus else None
+            if campaign is None:
+                raise LookupError(f"Unknown campaign {campaign_id}")
+            client = await db.get(Client, campaign.client_id)
+            if client is None:
+                raise LookupError(f"Campaign {campaign_id} has no client")
+            skus = list(campaign.product_skus) if campaign.product_skus else None
 
-            q = select(CatalogItem).where(CatalogItem.is_active.is_(True))
+            q = select(CatalogItem).where(CatalogItem.client_id == client.id, CatalogItem.is_active.is_(True))
             if skus:
                 q = q.where(CatalogItem.sku.in_(skus))
             items = (await db.execute(q.order_by(CatalogItem.version))).scalars().all()
@@ -213,11 +241,15 @@ async def load_knowledge(campaign_id: str) -> CampaignKnowledge:
                        for i in items}  # later versions overwrite earlier
 
             offers = (await db.execute(select(Offer).where(
-                Offer.is_active.is_(True), Offer.valid_until > now,
+                Offer.client_id == client.id, Offer.is_active.is_(True), Offer.valid_until > now,
                 (Offer.campaign_id == campaign_id) | (Offer.campaign_id.is_(None))))).scalars().all()
 
-            policies = (await db.execute(select(Policy).where(Policy.is_active.is_(True)))).scalars().all()
-            availability = (await db.execute(select(Availability))).scalars().all()
+            policies = (await db.execute(select(Policy).where(Policy.client_id == client.id,
+                                                              Policy.is_active.is_(True)))).scalars().all()
+            availability = (await db.execute(select(Availability).where(Availability.client_id == client.id))).scalars().all()
+            faqs = (await db.execute(select(FAQ).where(
+                FAQ.client_id == client.id, FAQ.is_active.is_(True),
+                (FAQ.campaign_id == campaign_id) | (FAQ.campaign_id.is_(None))).limit(500))).scalars().all()
 
             pq = select(Playbook).where(Playbook.campaign_id == campaign_id, Playbook.status == "approved")
             if campaign and campaign.script_version:
@@ -238,9 +270,21 @@ async def load_knowledge(campaign_id: str) -> CampaignKnowledge:
             availability=[AvailabilityEntry(a.sku, a.pincode_prefix, a.available, a.eta_text) for a in availability],
             stage_prompts=dict(playbook.stage_prompts),
             objection_playbooks=dict(playbook.objection_playbooks),
+            faqs=[{"question": f.question, "answer": f.answer} for f in faqs],
             source="database",
             primary_sku=skus[0] if skus else None,
+            client_id=client.id,
+            company_name=client.company_name,
+            persona_name=client.agent_persona_name or s.AGENT_PERSONA_NAME,
+            complaint_contact=client.complaint_contact or s.COMPLAINT_CONTACT,
+            # Stored voices are Bulbul names, so they apply only when Bulbul is speaking
+            voice_id=(s.tts_voice if s.TTS_PROVIDER != "sarvam" else campaign.voice_id or client.voice_id or s.tts_voice),
+            caller_id=client.caller_id,
+            transfer_numbers=list(client.transfer_numbers or []),
+            payment_links_enabled=bool(client.payment_links_enabled),
         )
     except Exception as e:
+        if s.is_production or campaign_id != SEED_CAMPAIGN_ID:
+            raise KnowledgeUnavailable(f"No approved content for campaign {campaign_id}: {e!r}") from e
         logger.warning(f"Knowledge load from database failed ({e!r}); using approved seed content")
         return seed_knowledge(campaign_id)

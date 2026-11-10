@@ -1,6 +1,6 @@
-"""Speech processing components: Hinglish normalizer, lexicon, phrase cache and Bulbul REST client.
+"""Speech processing components: Hinglish normalizer, lexicon, phrase cache and REST TTS clients.
 
-Streaming STT/TTS on calls uses the official LiveKit Sarvam plugin (see agent.worker).
+The STT and TTS providers for calls are chosen in agent.worker.
 """
 
 from .normalizer import HinglishNormalizer

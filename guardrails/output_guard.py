@@ -40,7 +40,7 @@ class GuardVerificationResult:
 # (pattern, required completed action, rule name)
 COMMITMENT_RULES: List[Tuple[re.Pattern, str, str]] = [
     (re.compile(r"(link|payment).{0,40}\b(bhej|send|sent)\s*(diya|di|de\s*diya|kar\s*diya|kar\s*di|chuki|chuka|ho\s*gaya|ho\s*gayi|raha|rahi|rahe)\b|\b(bhej|send)\s*(diya|di)\b.{0,30}\blink", re.I), "send_payment_link", "commitment_payment_link"),
-    (re.compile(r"(demo|meeting|slot|appointment).{0,40}\b(book|confirm|schedule|fix)\w*\s*(ho\s*gaya|ho\s*gayi|kar\s*(diya|di|li|liya)|ho\s*jayega|hai)\b", re.I), "book_demo", "commitment_demo"),
+    (re.compile(r"(demo|meeting|slot|appointment).{0,40}\b(book|confirm|schedule|fix)\w*\s*(ho\s*gaya|ho\s*gayi|kar\s*(diya|di|li|liya|deti|dungi|rahi|raha)|karti|ho\s*jayega|hai)\b", re.I), "book_demo", "commitment_demo"),
     (re.compile(r"\b(transfer|connect)\s*kar\s*(rahi|raha|rahe|deti|deta|dungi|dunga|di|diya)\b", re.I), "transfer_to_human", "commitment_transfer"),
     (re.compile(r"\b(aapko|aap\s*ko)\b.{0,40}\b(call|phone)\s*(karungi|karunga|karti\s*hoon|karta\s*hoon|karenge|karegi|karte\s*hain|kar\s*dungi)\b", re.I), "schedule_callback", "commitment_callback"),
     (re.compile(r"\brefund\b.{0,50}\b(mil\s*jayega|ho\s*jayega|milega|kar\s*denge|de\s*denge|mil\s*jaata)\b", re.I), "policy:refunds", "commitment_refund"),

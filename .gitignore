@@ -37,3 +37,17 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+
+# Local models
+models/
+assets/phrases/local/
+stt_bakeoff*.csv
+.venv-tts/
+.venv-convert/
+
+# Bake-off recordings, which can contain real voices
+samples/
+CLAUDE.md
+assets/phrases/
+tts_check.wav
+.claude/

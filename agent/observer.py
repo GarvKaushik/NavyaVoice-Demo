@@ -49,7 +49,7 @@ class CallState:
         del bucket[:-limit]  # keep only the most recent few
 
 
-OBSERVER_PROMPT = """You analyse one turn of a Hinglish sales call for a CRM product. Return ONLY a JSON object:
+OBSERVER_PROMPT = """You analyse one turn of a Hinglish sales call. Return ONLY a JSON object:
 {"needs": [short English phrases], "objection": one of ["price","timing","trust","competitor","need",null],
  "buying_signals": [short phrases], "budget_hint": string or null, "preferences": [short phrases],
  "intent": one of ["none","opt_out","call_later","wrong_person","abuse","transfer_human","complaint"],

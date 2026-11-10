@@ -54,7 +54,9 @@ async def main(lines, name: str, campaign: str, verbose: bool) -> None:
                 show(u)
             ttft = engine.last_turn_metrics.get("llm_ttft_ms")
             print(f"         [stage {engine.stage.current_stage.value} | first sentence {first:.0f} ms"
-                  f"{f' | LLM TTFT {ttft:.0f} ms' if ttft else ''}]")
+                  f"{f' | LLM TTFT {ttft:.0f} ms' if ttft else ''}"
+                  f" | total {(time.monotonic() - t0) * 1000:.0f} ms"
+                  f" | tokens in/out so far {engine.usage.input_tokens}/{engine.usage.output_tokens}]")
         for kind, data in events:
             if kind in ("tool_call", "fast_path", "stage_change", "late_intent"):
                 brief = {k: v for k, v in data.items() if k != "result"}

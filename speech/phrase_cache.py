@@ -17,6 +17,7 @@ from collections import OrderedDict
 from typing import Dict, Optional, Tuple
 
 from config.settings import get_settings
+from speech.normalizer import HinglishNormalizer
 
 logger = logging.getLogger(__name__)
 
@@ -83,18 +84,19 @@ class PreRenderedPhraseCache:
         ACK_SHORT: "Ji bilkul.",
     }
 
-    def __init__(self, cache_dir: Optional[str] = None, voice: Optional[str] = None):
+    def __init__(self, cache_dir: Optional[str] = None, voice: Optional[str] = None, company: Optional[str] = None,
+                 persona: Optional[str] = None, complaint_contact: Optional[str] = None):
         s = get_settings()
         self.cache_dir = cache_dir or s.PHRASE_CACHE_DIR
-        self.voice = voice or s.BULBUL_TTS_VOICE_ID
-        self.model = s.BULBUL_TTS_MODEL
-        self.sample_rate = s.BULBUL_TTS_SAMPLE_RATE
+        self.voice = voice or s.tts_voice
+        self.model = s.tts_model
+        self.sample_rate = s.tts_sample_rate
         self.pitch = s.BULBUL_TTS_PITCH
         self.pace = s.BULBUL_TTS_PACE
         self._fmt = {
-            "company": s.COMPANY_NAME,
-            "persona": s.AGENT_PERSONA_NAME,
-            "complaint_contact": s.COMPLAINT_CONTACT,
+            "company": company or s.COMPANY_NAME,
+            "persona": persona or s.AGENT_PERSONA_NAME,
+            "complaint_contact": complaint_contact or s.COMPLAINT_CONTACT,
         }
         # Maps phrase_id -> raw 16-bit PCM audio
         self._audio_cache: Dict[str, bytes] = {}
@@ -165,16 +167,18 @@ class PreRenderedPhraseCache:
 class SentenceAudioCache:
     """LRU of synthesized sentences, memory first then disk (shared per pod)."""
 
-    def __init__(self, cache_dir: Optional[str] = None, max_items: Optional[int] = None):
+    def __init__(self, cache_dir: Optional[str] = None, max_items: Optional[int] = None, voice: Optional[str] = None):
         s = get_settings()
-        self.dir = os.path.join(cache_dir or s.PHRASE_CACHE_DIR, "runtime", s.BULBUL_TTS_VOICE_ID)
+        self.voice = voice or s.tts_voice
+        self.dir = os.path.join(cache_dir or s.PHRASE_CACHE_DIR, "runtime", self.voice)
         self.max_items = max_items or s.TTS_RUNTIME_CACHE_MAX_ITEMS
         self._s = s
         self._mem: "OrderedDict[str, bytes]" = OrderedDict()
 
     def _key(self, text: str) -> str:
         s = self._s
-        return audio_key(text, s.BULBUL_TTS_VOICE_ID, s.BULBUL_TTS_MODEL, s.BULBUL_TTS_SAMPLE_RATE,
+        # Keyed on what is actually spoken, so a pronunciation change never replays old audio
+        return audio_key(HinglishNormalizer.normalize(text), self.voice, s.tts_model, s.tts_sample_rate,
                          s.BULBUL_TTS_PITCH, s.BULBUL_TTS_PACE)
 
     def get(self, text: str) -> Optional[bytes]:

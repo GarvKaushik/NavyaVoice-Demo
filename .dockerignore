@@ -1,0 +1,64 @@
+# Secrets and local config
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+.claude/
+livekit_sip.json
+
+# Version control and project notes
+.git/
+.gitignore
+CLAUDE.md
+README.md
+
+# Python
+**/__pycache__/
+**/*.py[cod]
+.venv/
+.venv-*/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+pytest.ini
+
+# Frontend source dependencies; frontend/dist stays because the API serves it
+frontend/node_modules/
+**/*.tsbuildinfo
+
+# Local data, logs and recordings
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/*.log
+samples/
+stt_bakeoff*.csv
+benchmark_results.json
+
+# Business documents
+**/*.docx
+**/~$*
+*.drawio
+
+# Local models and listening copies
+models/
+assets/phrases/listen/
+assets/phrases/local/
+
+# Deployment files and OS or editor files
+Dockerfile
+.dockerignore
+docker-compose.yml
+k8s/
+**/.DS_Store
+**/Thumbs.db
+**/desktop.ini
+.vscode/
+.idea/
+assets/phrases/
+tts_check.wav
+
+deploy/
+SETUP.md

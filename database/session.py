@@ -4,6 +4,7 @@ Engines are created lazily so tests and tools can point the app at another
 database (e.g. SQLite) with `configure_database(url)` before first use.
 """
 
+import os
 from typing import AsyncGenerator, Optional
 
 from sqlalchemy.ext.asyncio import (
@@ -26,7 +27,7 @@ _read_sessionmaker: Optional[async_sessionmaker] = None
 
 def _make_engine(url: str) -> AsyncEngine:
     settings = get_settings()
-    if url.startswith("sqlite"):
+    if url.startswith("sqlite") or os.environ.get("TEST_DATABASE_URL"):
         from sqlalchemy.pool import NullPool
 
         return create_async_engine(url, echo=False, poolclass=NullPool)  # safe across event loops (tests)
@@ -36,6 +37,7 @@ def _make_engine(url: str) -> AsyncEngine:
         pool_size=settings.DATABASE_POOL_SIZE,
         max_overflow=10,
         pool_pre_ping=True,
+        connect_args={"timeout": 3},  # a stopped server must not hold up a call
     )
 
 

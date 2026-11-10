@@ -41,11 +41,13 @@ def parse_callback_time(text: str, now: Optional[datetime] = None, tz_name: Opti
         day = now + timedelta(days=7)
 
     hour = None
-    m = re.search(r"\b(\d{1,2}|ek|do|teen|chaar|char|paanch|panch|chhah|che|saat|aath|nau|das|gyaarah|gyarah|baarah|barah)\s*(baje|bje|o'?clock|am|pm)\b", t)
+    minute = 0
+    m = re.search(r"\b(\d{1,2}|ek|do|teen|chaar|char|paanch|panch|chhah|che|saat|aath|nau|das|gyaarah|gyarah|baarah|barah)(?::(\d{2}))?\s*(baje|bje|o'?clock|am|pm)\b", t)
     if m:
         hour = _num(m.group(1))
         if hour is not None:
-            suffix = m.group(2)
+            minute = int(m.group(2) or 0) % 60
+            suffix = m.group(3)
             evening = any(w in t for w in ("shaam", "dopahar", "raat", "evening", "afternoon")) or suffix == "pm"
             if evening and hour < 12:
                 hour += 12
@@ -61,7 +63,7 @@ def parse_callback_time(text: str, now: Optional[datetime] = None, tz_name: Opti
         return None
     if hour is None:
         hour = 11
-    candidate = day.replace(hour=min(hour, 23), minute=0, second=0, microsecond=0)
+    candidate = day.replace(hour=min(hour, 23), minute=minute, second=0, microsecond=0)
     if candidate <= now:
         candidate += timedelta(days=1)
     return clamp_to_window(candidate, tz)

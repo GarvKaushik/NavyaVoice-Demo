@@ -1,0 +1,9 @@
+# Local demo only (CPU laptop). Install on top of requirements.txt.
+faster-whisper>=1.1.0        # whisper_hinglish engine (CTranslate2, int8, CPU)
+indic-transliteration>=2.3.0 # Devanagari to Roman for IndicConformer output
+onnxruntime>=1.20.0          # indicconformer engine
+piper-tts>=1.8.0             # local TTS (GPL-3.0; check before shipping it in a product)
+soxr>=0.3.7                  # resampling
+soundfile>=0.12.1            # reading WAV files in the bake-off
+jiwer>=3.0.0                 # WER and CER in the bake-off
+huggingface_hub>=0.23.0      # gated model downloads
