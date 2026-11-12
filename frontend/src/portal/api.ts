@@ -30,7 +30,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     try {
       const body = await response.json();
       if (typeof body.detail === "string") message = body.detail;
-      else if (Array.isArray(body.detail)) message = "Please check the details you entered.";
+      else if (Array.isArray(body.detail)) {
+        // Name the field that failed, e.g. "products → 1 → eta_text: String should have at most 128 characters"
+        const first = body.detail[0];
+        const where = Array.isArray(first?.loc) ? first.loc.filter((part: unknown) => part !== "body").join(" → ") : "";
+        message = first?.msg ? `Please check ${where ? `${where}: ` : ""}${first.msg}` : "Please check the details you entered.";
+      }
     } catch {
       /* keep the general message */
     }
@@ -71,10 +76,13 @@ export const formatNumber = (n: number | null | undefined, digits = 0) =>
 export const formatInr = (n: number | null | undefined) => `₹${formatNumber(n, 2)}`;
 
 /** The API sends naive UTC timestamps. */
+export function parseTime(value: string): Date {
+  return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(value) ? value : `${value}Z`);
+}
+
 export function formatTime(value: string | null | undefined): string {
   if (!value) return "—";
-  const iso = /[zZ]|[+-]\d\d:?\d\d$/.test(value) ? value : `${value}Z`;
-  return new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+  return parseTime(value).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
 }
 
 export function formatDuration(seconds: number | null | undefined): string {

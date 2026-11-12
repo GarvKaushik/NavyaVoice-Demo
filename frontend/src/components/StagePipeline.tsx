@@ -22,10 +22,10 @@ export default function StagePipeline({ currentStage, endpointDelay }: Props) {
   const currentIndex = STAGES.findIndex(s => s.key === currentStage);
 
   return (
-    <div className="bg-gray-900/60 backdrop-blur rounded-xl p-4 border border-gray-800">
+    <div className="glass rounded-xl p-4 border border-white/70">
       <div className="flex items-center justify-between mb-2">
-        <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Sales Pipeline</h3>
-        <span className="text-xs bg-gray-800 text-gray-300 px-2 py-0.5 rounded-full">
+        <h3 className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Sales Pipeline</h3>
+        <span className="text-xs bg-black/5 text-gray-700 px-2 py-0.5 rounded-full">
           VAD Delay: {endpointDelay}ms
         </span>
       </div>
@@ -42,15 +42,15 @@ export default function StagePipeline({ currentStage, endpointDelay }: Props) {
               <div className={`flex flex-col items-center flex-1 ${isFuture ? "opacity-40" : ""}`}>
                 <div className={`w-9 h-9 rounded-full flex items-center justify-center text-sm transition-all duration-300 ${
                   isActive
-                    ? "bg-indigo-600 ring-2 ring-indigo-400 ring-offset-2 ring-offset-gray-950 scale-110"
+                    ? "bg-lime-400 ring-2 ring-lime-600 ring-offset-2 ring-offset-gray-50 scale-110"
                     : isPast
-                    ? "bg-green-700"
-                    : "bg-gray-800"
+                    ? "bg-green-300"
+                    : "bg-black/5"
                 }`}>
                   {isPast ? "✓" : stage.icon}
                 </div>
                 <span className={`text-[10px] mt-1.5 font-medium text-center leading-tight ${
-                  isActive ? "text-indigo-300" : isPast ? "text-green-400" : "text-gray-500"
+                  isActive ? "text-violet-700" : isPast ? "text-green-600" : "text-gray-500"
                 }`}>
                   {stage.label}
                 </span>
@@ -59,7 +59,7 @@ export default function StagePipeline({ currentStage, endpointDelay }: Props) {
               {/* Connector line */}
               {i < STAGES.length - 1 && (
                 <div className={`h-0.5 w-full min-w-2 mt-[-12px] ${
-                  isPast ? "bg-green-700" : "bg-gray-800"
+                  isPast ? "bg-green-300" : "bg-black/5"
                 }`} />
               )}
             </div>

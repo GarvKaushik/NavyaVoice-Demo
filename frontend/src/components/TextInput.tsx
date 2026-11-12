@@ -28,7 +28,7 @@ export default function TextInput({ onSend, disabled, placeholder }: Props) {
   };
 
   return (
-    <div className="flex items-center gap-2 p-3 bg-gray-900/80 border-t border-gray-800">
+    <div className="flex items-center gap-2 p-3 glass border-t border-white/70">
       <input
         type="text"
         value={text}
@@ -36,12 +36,12 @@ export default function TextInput({ onSend, disabled, placeholder }: Props) {
         onKeyDown={handleKeyDown}
         disabled={disabled}
         placeholder={placeholder || "Type a message (or speak into mic)..."}
-        className="flex-1 bg-gray-800 text-gray-200 text-sm rounded-lg px-4 py-2.5 border border-gray-700 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none disabled:opacity-50 placeholder:text-gray-600"
+        className="flex-1 bg-black/5 text-gray-800 text-sm rounded-lg px-4 py-2.5 border border-gray-300 focus:border-lime-500 focus:ring-1 focus:ring-lime-500 outline-none disabled:opacity-50 placeholder:text-gray-400"
       />
       <button
         onClick={handleSend}
         disabled={disabled || !text.trim()}
-        className="px-4 py-2.5 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        className="px-4 py-2.5 bg-neutral-900 text-white text-sm font-medium rounded-lg hover:bg-lime-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
       >
         Send
       </button>

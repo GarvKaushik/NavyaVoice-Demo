@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from livekit import api as lk_api
 from pydantic import BaseModel, Field
-from sqlalchemy import desc, func, select, update
+from sqlalchemy import case, desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent.knowledge import DEFAULT_STAGE_PROMPTS
@@ -150,6 +150,7 @@ def _call_row(r: CallRecord, lead: Optional[Lead]) -> Dict[str, Any]:
             "customer_name": lead.full_name if lead else None, "phone_number": lead.phone_number if lead else None,
             "status": r.status, "conclusion": conclusion, "conclusion_label": CONCLUSION_LABELS[conclusion],
             "outcome": r.outcome, "start_time": r.start_time, "answered": r.answered_at is not None,
+            "answered_at": r.answered_at, "end_time": r.end_time,
             "answered_seconds": r.duration_seconds if r.answered_at else 0,
             "billed_minutes": _minutes(r.client_billed_seconds),
             "has_recording": bool(r.recording_url and not r.recording_deleted_at)}
@@ -212,7 +213,8 @@ async def client_ledger(limit: int = Query(default=50, le=200), client_id: str =
 async def client_calls(conclusion: Optional[str] = None, campaign_id: Optional[str] = None,
                        limit: int = Query(default=50, le=200), offset: int = Query(default=0, ge=0),
                        client_id: str = Depends(client_scope), db: AsyncSession = Depends(get_db_session)):
-    where = [CallRecord.client_id == client_id, CallRecord.direction == "outbound", CallRecord.status == "ended"]
+    base = [CallRecord.client_id == client_id, CallRecord.direction == "outbound", CallRecord.status == "ended"]
+    where = list(base)
     if campaign_id:
         where.append(CallRecord.campaign_id == campaign_id)
     if conclusion == "other":
@@ -223,7 +225,38 @@ async def client_calls(conclusion: Optional[str] = None, campaign_id: Optional[s
     total = (await db.execute(select(func.count()).select_from(CallRecord).where(*where))).scalar()
     rows = (await db.execute(select(CallRecord, Lead).join(Lead, Lead.id == CallRecord.lead_id).where(*where)
                              .order_by(desc(CallRecord.start_time)).limit(limit).offset(offset))).all()
-    return {"total": total, "calls": [_call_row(r, lead) for r, lead in rows]}
+    return {"total": total, "calls": [_call_row(r, lead) for r, lead in rows],
+            **await _call_totals(db, base, campaign_id)}
+
+
+async def _call_totals(db: AsyncSession, base: list, campaign_id: Optional[str]) -> Dict[str, Any]:
+    """Totals per campaign (for the campaign picker) and result counts for the chosen campaign (for the filters)."""
+    answered = CallRecord.answered_at.isnot(None)
+    grouped = (await db.execute(select(
+        CallRecord.campaign_id, CallRecord.outcome, func.count(),
+        func.sum(case((answered, 1), else_=0)),
+        func.sum(case((answered, CallRecord.duration_seconds), else_=0)),
+        func.sum(func.coalesce(CallRecord.client_billed_seconds, 0)),
+    ).where(*base).group_by(CallRecord.campaign_id, CallRecord.outcome))).all()
+    campaigns: Dict[str, Dict[str, Any]] = {}
+    counts = {c: 0 for c in CONCLUSIONS}
+    for cid, outcome, calls, answered_calls, talk, billed in grouped:
+        t = campaigns.setdefault(cid, {"campaign_id": cid, "calls": 0, "answered": 0, "ready": 0,
+                                       "talk_seconds": 0, "billed_seconds": 0})
+        t["calls"] += calls
+        t["answered"] += answered_calls or 0
+        t["talk_seconds"] += talk or 0
+        t["billed_seconds"] += billed or 0
+        conclusion = conclusion_for(outcome)
+        if conclusion == "ready":
+            t["ready"] += calls
+        if not campaign_id or cid == campaign_id:
+            counts[conclusion] += calls
+    for t in campaigns.values():
+        t["billed_minutes"] = _minutes(t.pop("billed_seconds"))
+    totals = list(campaigns.values())
+    return {"campaigns": totals,
+            "conclusions": [{"key": c, "label": CONCLUSION_LABELS[c], "count": counts[c]} for c in CONCLUSIONS]}
 
 
 @router.get("/client/calls/{call_id}", tags=["Client"])
@@ -702,16 +735,16 @@ class ProductBody(BaseModel):
     plan: str = Field(default="Monthly", max_length=64)
     name: str = Field(min_length=1, max_length=128)
     price_inr: float = Field(ge=0)
-    billing_period: str = "monthly"
+    billing_period: str = Field(default="monthly", max_length=32)  # lengths match the database columns
     description: str = ""
     features: List[str] = []
-    eta_text: Optional[str] = None
+    eta_text: Optional[str] = Field(default=None, max_length=128)
 
 
 class PolicyBody(BaseModel):
     topic: str = Field(pattern="^(refunds|cancellation|data_residency)$")
-    title: str
-    approved_text: str
+    title: str = Field(min_length=1, max_length=128)
+    approved_text: str = Field(min_length=1)
 
 
 class ContentBody(BaseModel):
@@ -906,13 +939,17 @@ async def admin_set_content(client_id: str, req: ContentBody, admin: User = Depe
     """Sets the client's products, policies and script. Campaigns pick the new script up on their next call."""
     client = await _client_or_404(db, client_id)
     await db.execute(update(CatalogItem).where(CatalogItem.client_id == client_id).values(is_active=False))
-    for p in req.products:
-        await db.merge(CatalogItem(client_id=client_id, sku=p.sku.upper(), plan=p.plan, version=1, name=p.name,
+    # One catalog row per product and plan, but one delivery time per product: a product sold Monthly and
+    # Yearly must not write its delivery time twice. If an entry is repeated, the last one wins.
+    items = {(p.sku.upper(), p.plan): p for p in req.products}
+    delivery = {sku: p.eta_text for (sku, _), p in items.items() if p.eta_text}
+    for (sku, plan), p in items.items():
+        await db.merge(CatalogItem(client_id=client_id, sku=sku, plan=plan, version=1, name=p.name,
                                    price_inr=p.price_inr, billing_period=p.billing_period, description=p.description,
                                    features=p.features, is_active=True))
-        if p.eta_text:
-            await db.merge(Availability(client_id=client_id, sku=p.sku.upper(), pincode_prefix="", available=True,
-                                        eta_text=p.eta_text))
+    for sku, eta_text in delivery.items():
+        await db.merge(Availability(client_id=client_id, sku=sku, pincode_prefix="", available=True,
+                                    eta_text=eta_text))
     await db.execute(update(Policy).where(Policy.client_id == client_id).values(is_active=False))
     for p in req.policies:
         await db.merge(Policy(client_id=client_id, topic=p.topic, version="v1", title=p.title,
@@ -925,7 +962,7 @@ async def admin_set_content(client_id: str, req: ContentBody, admin: User = Depe
     for campaign in campaigns:
         await publish_playbook(db, campaign, client.default_stage_prompts or DEFAULT_STAGE_PROMPTS,
                                client.default_objection_playbooks or {}, admin.email)
-    audit(db, admin, "content_updated", client_id, client_id, products=len(req.products))
+    audit(db, admin, "content_updated", client_id, client_id, products=len(items))
     await db.commit()
     return {"status": "updated", "campaigns_updated": len(campaigns)}
 

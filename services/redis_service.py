@@ -8,8 +8,10 @@ Handles:
 - Active call counts and circuit breakers
 """
 
+import asyncio
 import time
 import logging
+import weakref
 from typing import Optional
 from config.settings import get_settings
 
@@ -27,7 +29,9 @@ class RedisService:
 
     def __init__(self, redis_url: Optional[str] = None):
         self.redis_url = redis_url or settings.REDIS_URL
-        self._client = None
+        # One client per event loop: its connections belong to the loop that opened them, and the call worker runs
+        # each call on a loop of its own (in a thread on Windows)
+        self._clients: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
         # In-memory mock store fallback if Redis server is unavailable in testing
         self._mock_store: dict = {}
         self._mock_locks: dict = {}
@@ -35,24 +39,27 @@ class RedisService:
 
     async def get_client(self):
         """Initializes and returns async Redis client, or None if unavailable."""
-        if self._client is None and aioredis is not None and time.monotonic() >= self._retry_at:
+        loop = asyncio.get_running_loop()
+        client = self._clients.get(loop)
+        if client is None and aioredis is not None and time.monotonic() >= self._retry_at:
             try:
-                self._client = aioredis.from_url(
+                client = aioredis.from_url(
                     self.redis_url,
                     encoding="utf-8",
                     decode_responses=True,
                     socket_timeout=2.0,
                     socket_connect_timeout=0.5,  # a stopped local server must not hold up a call
                 )
-                await self._client.ping()
+                await client.ping()
+                self._clients[loop] = client
             except Exception as e:
                 logger.warning(
                     f"Unable to connect to Redis at {self.redis_url}: {e}. "
                     f"Falling back to resilient in-memory synchronization."
                 )
-                self._client = None
+                client = None
                 self._retry_at = time.monotonic() + 30  # do not block every call on reconnects
-        return self._client
+        return client
 
     # --------------------------------------------------------------------------
     # DND & Opt-Out Immediate Filtering

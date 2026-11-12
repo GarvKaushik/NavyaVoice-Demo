@@ -51,3 +51,8 @@ CLAUDE.md
 assets/phrases/
 tts_check.wav
 .claude/
+# Voice listening tests (python -m modal run deploy/modal_tts.py::samples)
+assets/*_voices/
+
+# LiveKit SIP trunk file (holds the provider password)
+outbound-trunk.json

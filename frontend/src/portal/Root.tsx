@@ -43,16 +43,16 @@ function Login({ option, onChoose, onHome, onSignedIn }: {
   }
 
   return (
-    <div className="min-h-screen bg-gray-950 flex flex-col items-center justify-center gap-6 px-4 py-8">
-      <button onClick={onHome} aria-label="NavyaVoice home"><Logo /></button>
-      <form onSubmit={submit} className="w-full max-w-sm space-y-4 rounded-xl border border-gray-800 bg-gray-900/60 p-6">
-        <h1 className="text-lg font-bold text-white">Log in</h1>
-        <div role="radiogroup" aria-label="Login type" className="grid grid-cols-2 gap-1 rounded-lg bg-gray-950 p-1">
+    <div className="min-h-screen flex flex-col items-center justify-center gap-6 px-4 py-8">
+      <button onClick={onHome} aria-label="Navyakta AI home"><Logo /></button>
+      <form onSubmit={submit} className="w-full max-w-sm space-y-4 glass rounded-3xl p-7">
+        <h1 className="text-2xl font-medium tracking-tight text-gray-900">Log in</h1>
+        <div role="radiogroup" aria-label="Login type" className="grid grid-cols-2 gap-1 rounded-full bg-white/70 p-1">
           {LOGIN_OPTIONS.map((o) => (
             <button key={o.key} type="button" role="radio" aria-checked={selected.key === o.key}
               onClick={() => { setError(null); onChoose(o.key); }}
-              className={`rounded-md py-1.5 text-sm font-medium transition-colors ${
-                selected.key === o.key ? "bg-indigo-600 text-white" : "text-gray-400 hover:text-white"
+              className={`rounded-full py-1.5 text-sm font-medium transition-colors ${
+                selected.key === o.key ? "bg-neutral-900 text-white" : "text-gray-600 hover:text-gray-900"
               }`}>
               {o.label}
             </button>
@@ -63,7 +63,7 @@ function Login({ option, onChoose, onHome, onSignedIn }: {
         <Message error={error} />
         <Button type="submit" disabled={busy} className="w-full">{busy ? "Logging in…" : `Log in as ${selected.label.toLowerCase()}`}</Button>
       </form>
-      <button onClick={onHome} className="text-sm text-gray-400 hover:text-white">Back to home</button>
+      <button onClick={onHome} className="text-sm text-gray-600 hover:text-gray-900">Back to home</button>
     </div>
   );
 }
@@ -95,7 +95,7 @@ export default function Root() {
     window.location.hash = "";
   }
 
-  if (!checked) return <div className="min-h-screen bg-gray-950" />;
+  if (!checked) return <div className="min-h-screen" />;
   if (!user) {
     if (route.startsWith("login")) {
       return <Login option={route.split("/")[1] ?? "customer"} onChoose={(key) => navigate(`login/${key}`)}
@@ -103,7 +103,7 @@ export default function Root() {
     }
     return <Landing onLogin={() => navigate("login/customer")} />;
   }
-  if (route.startsWith("login")) return <div className="min-h-screen bg-gray-950" />;
+  if (route.startsWith("login")) return <div className="min-h-screen" />;
 
   if (user.role === "client") {
     return <ClientApp title={user.client_name ?? "Your account"} subtitle={user.email} onSignOut={signOut} />;
@@ -113,7 +113,7 @@ export default function Root() {
       <div className="relative">
         <App />
         <button onClick={() => navigate("overview")}
-          className="fixed bottom-4 left-4 z-10 rounded-lg border border-gray-700 bg-gray-900 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-800">
+          className="fixed bottom-4 left-4 z-10 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-800 hover:bg-black/5">
           Back to admin
         </button>
       </div>

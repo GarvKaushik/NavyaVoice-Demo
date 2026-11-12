@@ -10,24 +10,24 @@ interface Props {
 }
 
 export default function MetricsPanel({ latency, cost }: Props) {
-  const latencyColor = latency < 500 ? "text-green-400" : latency < 1000 ? "text-yellow-400" : "text-red-400";
+  const latencyColor = latency < 500 ? "text-green-600" : latency < 1000 ? "text-yellow-600" : "text-red-600";
 
   return (
-    <div className="bg-gray-900/60 backdrop-blur rounded-xl p-4 border border-gray-800 space-y-3">
-      <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+    <div className="glass rounded-xl p-4 border border-white/70 space-y-3">
+      <h3 className="text-xs font-semibold text-gray-600 uppercase tracking-wider">
         📊 Telemetry
       </h3>
 
       {/* Turn Latency */}
       <div className="flex items-center justify-between">
-        <span className="text-xs text-gray-400">Turn Latency</span>
+        <span className="text-xs text-gray-600">Turn Latency</span>
         <span className={`text-sm font-mono font-semibold ${latencyColor}`}>
           {latency > 0 ? `${latency.toFixed(0)}ms` : "—"}
         </span>
       </div>
 
       {/* Latency bar */}
-      <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+      <div className="h-1.5 bg-black/5 rounded-full overflow-hidden">
         <div
           className={`h-full rounded-full transition-all duration-500 ${
             latency < 500 ? "bg-green-500" : latency < 1000 ? "bg-yellow-500" : "bg-red-500"
@@ -38,10 +38,10 @@ export default function MetricsPanel({ latency, cost }: Props) {
 
       {/* Cost Breakdown */}
       {cost && (
-        <div className="space-y-2 pt-2 border-t border-gray-800">
+        <div className="space-y-2 pt-2 border-t border-white/70">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-gray-400">Session Cost</span>
-            <span className="text-sm font-mono font-semibold text-emerald-400">
+            <span className="text-xs text-gray-600">Session Cost</span>
+            <span className="text-sm font-mono font-semibold text-emerald-600">
               ₹{cost.total_inr.toFixed(2)}
             </span>
           </div>
@@ -72,7 +72,7 @@ function CostRow({ label, value }: { label: string; value: number }) {
   return (
     <div className="flex items-center justify-between">
       <span className="text-[11px] text-gray-500">{label}</span>
-      <span className="text-[11px] font-mono text-gray-400">₹{value.toFixed(3)}</span>
+      <span className="text-[11px] font-mono text-gray-600">₹{value.toFixed(3)}</span>
     </div>
   );
 }

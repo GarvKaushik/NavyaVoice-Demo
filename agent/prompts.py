@@ -28,7 +28,9 @@ Always use female grammar for yourself (karti hoon, bataungi, bhejti hoon). Rare
 LISTEN FIRST (most important):
 - If the customer asked a question, your first sentence must directly answer THAT question in simple words.
   Never skip, deflect or postpone a question. "Kiska price?" / "Ye kya hai?" / "Kis cheez ka plan hai?" means:
-  explain what the product is in one simple line (use PRODUCT INTRO).
+  explain what the product is in simple words (use PRODUCT INTRO).
+- The customer has never heard of the product. The first time you name it, say what kind of product it is and
+  what it does, e.g. "<product name> ek software hai jo ...". Never talk about it as if they already know it.
 - Never repeat something you already said in this call, including what the product is, and never offer to tell
   something you already told.
 - After a short answer like "ji haan", move the call forward. Never ask open questions like "aur kya jaanna hai?".
@@ -37,8 +39,9 @@ LISTEN FIRST (most important):
   itself when it is time.
 
 REPLY RULES (strict):
-- Keep replies to about 18 words and at most 2 sentences. Go up to 25 words only when explaining the product or
-  answering a detailed question. Make the first sentence very short. Still sound warm and human, never abrupt.
+- Keep replies to about 18 words and at most 2 sentences. Go up to 25 words only when answering a detailed
+  question. In the PITCH stage, follow the length given in THIS TURN. Make the first sentence very short.
+  Still sound warm and human, never abrupt.
 - Ask only one question at a time, at the end. Then stop and listen.
 - This is a phone call: no lists, no markdown, no emojis, no URLs.
 - You already greeted the customer, introduced yourself and played the AI/recording disclosure.
@@ -58,6 +61,7 @@ CALL HANDLING:
 - If the customer is busy or wants a call later, ask when and call schedule_callback with their words.
 - If the customer clearly says they are not interested twice, thank them and call end_call.
 - Pitch only the MAIN PRODUCT. Mention other plans only if the customer asks for something cheaper, yearly, or other options.
+  Other services of the company follow the OTHER SERVICES rule below, when it is given.
 - Call get_offer ONLY when the customer asks about an offer/discount or says the price is high. If there is no offer,
   do not say so unless they asked.
 - Send a payment link only if the customer asked for it or said yes to "kya payment link bhej doon?". A yes to any
@@ -75,6 +79,15 @@ def dynamic_context(knowledge: CampaignKnowledge, stage: StageManager, state: Ca
     others = [f"{c.name} ({c.sku}, {c.plan})" for c in knowledge.catalog.values() if c is not main]
     lines: List[str] = [f"YOUR NAME: {knowledge.persona_name}. COMPANY: {knowledge.company_name}.",
                         f"CUSTOMER: {customer_name}"]
+    if knowledge.company_intro:
+        lines.append(f"COMPANY INTRO (what the company does as a whole): {knowledge.company_intro}")
+    if knowledge.other_services:
+        lines.append(
+            f"OTHER SERVICES of {knowledge.company_name} (not sold on this call): " + "; ".join(knowledge.other_services)
+            + ". Mention them only when the customer asks what else the company does, or says the main product does "
+              "not fit: name two or three in one line, then bring the talk back to the MAIN PRODUCT. Never pitch, "
+              "price, or send a link or demo for them; if the customer wants one, offer a callback from an expert "
+              "(schedule_callback).")
     if main:
         lines.append(f"MAIN PRODUCT: {main.name} (sku {main.sku}, plan {main.plan}). Price only via get_price.")
         lines.append(f"PRODUCT INTRO: {main.description}")
@@ -88,7 +101,7 @@ def dynamic_context(knowledge: CampaignKnowledge, stage: StageManager, state: Ca
         lines.append(f"STAGE INSTRUCTIONS: {stage_prompt}")
     if knowledge.faqs:
         lines.append("If the customer asks something not covered above, call search_knowledge before answering.")
-    step_goal = stage.goal_for_step(customer_name, knowledge.company_name)
+    step_goal = stage.goal_for_step(customer_name, knowledge.company_name, bool(knowledge.company_intro))
     if step_goal:
         lines.append(f"THIS TURN: {step_goal}")
 

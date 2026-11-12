@@ -40,6 +40,10 @@ MAX_TOOL_ROUNDS = 3
 MAX_REPLY_WORDS = 25  # beyond this, only a closing question may still be spoken
 MAX_REPLY_WORDS_WITH_QUESTION = 36
 MAX_SENTENCES_PER_REPLY = 3  # the prompt asks for 2; the third is only ever a closing question
+# A pitch explains the product to someone who has never heard of it, so it gets more room
+MAX_PITCH_WORDS = 45
+MAX_PITCH_WORDS_WITH_QUESTION = 55
+MAX_PITCH_SENTENCES = 4  # the prompt asks for 3; the fourth is only ever a closing question
 NAME_EVERY_REPLIES = 3  # replies that must pass before the customer's name may be used again
 OPT_OUT_CONFIRM_QUESTION = "Kya main aapka number calling list se hata doon?"
 
@@ -236,10 +240,15 @@ class DialogueEngine:
         sig.wants_price = sig.wants_price or asked.wants_price
 
     def _fits_reply(self, sentence: str, spoken: List[str]) -> bool:
-        """Keeps replies short: the first sentence always plays, then only what fits the word limit."""
+        """Keeps replies short: the first sentence always plays, then only what fits the word limit.
+        A pitch or company-introduction turn has a larger limit."""
         if not spoken:
             return True
         words = len(" ".join(spoken).split()) + len(sentence.split())
+        if self.stage.is_long_turn(bool(self.knowledge.company_intro)):
+            if sentence.rstrip().endswith("?"):
+                return len(spoken) < MAX_PITCH_SENTENCES and words <= MAX_PITCH_WORDS_WITH_QUESTION
+            return len(spoken) < MAX_PITCH_SENTENCES - 1 and words <= MAX_PITCH_WORDS
         if sentence.rstrip().endswith("?"):
             return len(spoken) < MAX_SENTENCES_PER_REPLY and words <= MAX_REPLY_WORDS_WITH_QUESTION
         return len(spoken) < 2 and words <= MAX_REPLY_WORDS

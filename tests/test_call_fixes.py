@@ -195,6 +195,44 @@ async def test_long_reply_is_trimmed_but_keeps_its_closing_question():
     assert [u.text for u in out] == [first, question]
 
 
+def test_pitch_gets_room_to_explain_the_product():
+    sentences = ["Nexus CRM Pro ek software hai.",
+                 "Yeh aapke leads ko khud call karta hai aur har call ki details CRM mein update karta hai.",
+                 "Isse aapki team ka follow-up kabhi miss nahi hota aur time bachta hai.",
+                 "Aapke kaam ka lagta hai?"]
+    e = engine_with([], stage=SalesStage.PITCH)
+    spoken = []
+    for s in sentences:
+        if e._fits_reply(s, spoken):
+            spoken.append(s)
+    assert spoken == sentences
+    e.stage.current_stage = SalesStage.DISCOVERY
+    assert not e._fits_reply(sentences[2], sentences[:2])  # other stages stay short
+
+
+def test_company_is_introduced_before_the_product_and_other_services_are_listed():
+    from agent.knowledge import service_summary
+    from agent.prompts import build_messages
+    from agent.stages import StageManager
+
+    e = engine_with([], stage=SalesStage.OPENING)
+    e.stage.step = CallStep.OFFER
+    e.knowledge.stage_prompts["INTRODUCTION"] = "Hum businesses ke liye AI agents, software aur websites banate hain."
+    e.knowledge.other_services = [service_summary("Nexus Appointment System",
+                                                  "Ek online booking software hai. Reminder bhi jata hai.")]
+    system = build_messages(e.knowledge, e.stage, e.state, "Rajesh", [])[0]["content"]
+    assert "COMPANY INTRO (what the company does as a whole): Hum businesses" in system
+    assert "Nexus Appointment System: Ek online booking software hai." in system
+    assert "Reminder" not in system  # only the first sentence of each other service
+    assert "Do not name the product yet" in system
+    assert e.stage.is_long_turn(company_intro=True)  # the introduction gets room to explain
+
+    plain = StageManager()
+    plain.current_stage, plain.step = SalesStage.OPENING, CallStep.OFFER
+    assert "Do not name the product yet" not in plain.goal_for_step("Rajesh", "Acme")  # no intro: old offer
+    assert not plain.is_long_turn(company_intro=False)
+
+
 def test_nexus_is_spoken_in_devanagari():
     spoken = HinglishNormalizer.normalize("Nexus CRM Pro ek AI calling software hai.")
     assert spoken == "नेक्सस C R M Pro ek A I calling software hai."

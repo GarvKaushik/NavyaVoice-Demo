@@ -68,3 +68,91 @@ def web():
     from speech.tts_server.app import app as service
 
     return service
+
+
+# ------------------------------------------------------------------------------
+# Listening test: the same sales lines in several Maya voices, Roman vs Devanagari script.
+#   python -m modal run deploy/modal_tts.py::samples
+#   python -m modal run deploy/modal_tts.py::samples --voices "Nivedita,Jahnavi"
+#   python -m modal run deploy/modal_tts.py::samples --engine svara      # the fallback voice
+# Writes WAV files to assets/maya_voices (or assets/svara_voices), which git ignores; Maya clips at normal
+# speed and at 1.1x (same pitch). Doesn't touch the service.
+# ------------------------------------------------------------------------------
+SAMPLE_LINES = [
+    "Namaste Rajesh ji! Main Priya bol rahi hoon, NavyaNexus se. Kya abhi do minute baat ho sakti hai?",
+    "Yeh plan sirf 1,499 rupaye mahine ka hai, aur pehle saat din bilkul free hain.",
+    "Bilkul samajh sakti hoon. Kya main aapko WhatsApp par details bhej doon?",
+]
+SAMPLE_VOICES = "Ahana,Nivedita,Tanushree,Jahnavi,Ishwari"
+
+
+@app.function(gpu=GPU, volumes={"/models": models}, secrets=[modal.Secret.from_name("navya-speech")], timeout=1800)
+def svara_samples(lines: list) -> dict:
+    """Svara exactly as the service uses it: Devanagari, "।" for full stops, a <happy> tag, 1.1x speed."""
+    import threading
+
+    import numpy as np
+
+    from speech.normalizer import HinglishNormalizer
+    from speech.tts_server.audio import to_float
+    from speech.tts_server.engines import SvaraEngine
+
+    engine = SvaraEngine()
+    engine.load()
+    clips = {}
+    for number, line in enumerate(lines, 1):
+        pieces = [to_float(c) for c in engine.stream(HinglishNormalizer.normalize(line), threading.Event())]
+        clips[f"Svara_line{number}"] = np.concatenate(pieces).astype(np.float32).tobytes() if pieces else b""
+    return clips
+
+
+@app.function(gpu=GPU, volumes={"/models": models}, secrets=[modal.Secret.from_name("navya-speech")], timeout=1800)
+def voice_samples(voices: list, lines: list) -> dict:
+    import numpy as np
+    from maya3 import Maya3TTS
+
+    from config.settings import get_settings
+    from speech.devanagari import to_devanagari
+    from speech.normalizer import HinglishNormalizer
+
+    tts = Maya3TTS.from_pretrained(get_settings().TTS_MAYA_MODEL, max_seats=1)
+    clips = {}
+    try:
+        for voice in voices:
+            for number, line in enumerate(lines, 1):
+                spoken = HinglishNormalizer.normalize(line)
+                for script, text in (("roman", spoken), ("devanagari", to_devanagari(spoken))):
+                    audio = tts.generate(text, lang="hi", voice=voice, normalize=True)
+                    clips[f"{voice}_line{number}_{script}"] = np.asarray(audio, dtype=np.float32).tobytes()
+    finally:
+        tts.close()
+    return clips
+
+
+@app.local_entrypoint()
+def samples(voices: str = SAMPLE_VOICES, out: str = "", engine: str = "maya"):
+    """--engine svara renders the fallback voice instead (already at its 1.1x recipe speed)."""
+    import wave
+
+    import numpy as np
+
+    from speech.stt_server.audio import float_to_pcm16
+    from speech.tts_server.audio import speed_up
+
+    folder = pathlib.Path(out) if out else ROOT / "assets" / f"{engine}_voices"  # ignored by git
+    folder.mkdir(parents=True, exist_ok=True)
+    if engine == "svara":
+        clips, speeds = svara_samples.remote(SAMPLE_LINES), (("", 1.0),)
+    else:
+        clips = voice_samples.remote([v.strip() for v in voices.split(",") if v.strip()], SAMPLE_LINES)
+        speeds = (("", 1.0), ("_fast", 1.1))
+    for name, raw in clips.items():
+        audio = np.frombuffer(raw, dtype=np.float32)
+        for suffix, factor in speeds:
+            take = speed_up(audio, 24000, factor)
+            with wave.open(str(folder / f"{name}{suffix}.wav"), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(24000)
+                w.writeframes(float_to_pcm16(take))
+    print(f"{len(clips) * len(speeds)} files in {folder}")

@@ -125,7 +125,11 @@ class Settings(BaseSettings):
     TTS_MAYA_MODEL: str = Field(default="maya-research/maya2-native", description="Maya checkpoint")
     TTS_MAYA_VOICE: str = Field(default="Ahana", description="Built-in Maya voice")
     TTS_MAYA_LANGUAGE: str = Field(default="hi", description="Language code passed to Maya")
-    TTS_MAYA_DEVANAGARI: bool = Field(default=True, description="Convert Roman Hinglish to Devanagari before Maya")
+    TTS_MAYA_DEVANAGARI: bool = Field(
+        default=False,
+        description="Convert Roman Hinglish to Devanagari before Maya. Off: Maya reads English words (business, "
+                    "software) as English; the conversion spells them by Hindi rules and they come out wrong",
+    )
     TTS_MAYA_SEATS: int = Field(default=1, description="Sentences Maya generates at once; more seats use more GPU memory")
     TTS_SVARA_GGUF: str = Field(default="models/svara/svara-tts-v1-Q3_K_M.gguf", description="Svara model file")
     TTS_SVARA_GGUF_REPO: str = Field(default="", description="Hugging Face repo to download the Svara file from, if missing")
@@ -215,6 +219,10 @@ class Settings(BaseSettings):
         description="Max concurrent calls per worker pod (~20 per 4 vCPU; measure and tune)"
     )
     WORKER_DRAIN_TIMEOUT_SECONDS: int = Field(default=900, description="Graceful drain limit on deploys")
+    WORKER_JOB_EXECUTOR: Literal["", "thread", "process"] = Field(
+        default="", description="How each call runs: empty keeps LiveKit's choice (threads on Windows, processes "
+                                "elsewhere); process gives every call its own process"
+    )
     WORKER_METRICS_PORT: int = Field(default=9100, description="Prometheus port exposed by agent workers")
 
     # --------------------------------------------------------------------------

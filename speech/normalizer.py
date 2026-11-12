@@ -21,7 +21,17 @@ PRODUCT_LEXICON: Dict[str, str] = {
     r"\bCRM-PRO\b": "C R M Pro",
     r"\bCRM-STARTER\b": "C R M Starter",
     r"\bNavyaNexus\b": "Navya Nexus",
+    r"\bNavyakta\b": "नव्यक्ता",  # navya + vyakta, said as one word
     r"\b[Nn]exus\b": "नेक्सस",  # the voice misreads the Roman spelling
+}
+
+# Hindi words the voice misreads in Roman script, sent in Devanagari instead
+HINDI_SPELLINGS: Dict[str, str] = {
+    r"\b[Tt]h(?:ee|i)k\b": "ठीक",  # "theek" did not sound like ठीक
+    r"\b[Aa]a jayengi\b": "आ जाएँगी",  # "aa jayengi" came out as the letters "A J G"
+    r"\b[Aa]a jayenge\b": "आ जाएँगे",
+    r"\bjayengi\b": "जाएँगी",  # applied after the "aa ..." forms above
+    r"\bjayenge\b": "जाएँगे",
 }
 
 
@@ -135,7 +145,7 @@ class HinglishNormalizer:
     @classmethod
     def normalize_abbreviations(cls, text: str) -> str:
         """Expands technical acronyms to avoid unnatural TTS synthesis."""
-        for pattern, replacement in PRODUCT_LEXICON.items():
+        for pattern, replacement in {**PRODUCT_LEXICON, **HINDI_SPELLINGS}.items():
             text = re.sub(pattern, replacement, text)
         acronyms = {
             r'\bCRM\b': "C R M",
@@ -168,9 +178,13 @@ class HinglishNormalizer:
 
         return phone_pattern.sub(_replace_phone, text)
 
+    # 1,49,999 (Indian grouping) or 12,999 / 1,000,000 (Western). "1,2,3" or "5, 10" are lists, not one number.
+    GROUPED_NUMBER = re.compile(r"(?<![\d,])(?:\d{1,2}(?:,\d{2})+,\d{3}|\d{1,3}(?:,\d{3})+)(?![\d,])")
+
     @classmethod
     def normalize_plain_numbers(cls, text: str) -> str:
-        """Speaks any remaining digit groups (e.g. '20 calls', '2 minute') in Hindi."""
+        """Speaks any remaining digit groups (e.g. '20 calls', '2 minute', '1,499') in Hindi."""
+        text = cls.GROUPED_NUMBER.sub(lambda m: m.group(0).replace(",", ""), text)
         return re.sub(
             r"\b\d{1,9}\b",
             lambda m: cls.int_to_hindi_phonetic(int(m.group(0))),

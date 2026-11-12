@@ -50,38 +50,38 @@ export default function DemoCall({ fallback }: { fallback: ReactNode }) {
       : ended ? "Call ended. You can talk again." : "Free demo, no sign-up";
 
   return (
-    <section aria-label="Talk to the agent" className="rounded-2xl border border-gray-800 bg-gray-900/70 p-6 shadow-2xl shadow-indigo-950/50">
-      <div className="flex items-center justify-between text-xs text-gray-400">
+    <section aria-label="Talk to the agent" className="glass rounded-3xl p-6">
+      <div className="flex items-center justify-between text-xs text-gray-600">
         <span>Live demo · Hinglish sales call</span>
-        {live && <span className="tabular-nums text-gray-300">{clock(left)} left</span>}
+        {live && <span className="tabular-nums text-gray-700">{clock(left)} left</span>}
       </div>
 
       <div className="mt-6 flex flex-col items-center text-center">
         <button onClick={live ? call.end : start} disabled={call.state === "connecting" || !info}
           aria-label={live ? "End the call" : "Talk to Priya"}
-          className={`relative flex h-28 w-28 items-center justify-center rounded-full text-white transition-colors disabled:opacity-60 ${
-            live ? "bg-red-600 hover:bg-red-500" : "bg-indigo-600 hover:bg-indigo-500"}`}>
-          {live && call.agentSpeaking && <span className="pulse-ring absolute inset-0 rounded-full border-2 border-indigo-400" aria-hidden="true" />}
+          className={`relative flex h-28 w-28 items-center justify-center rounded-full text-gray-900 transition-colors disabled:opacity-60 ${
+            live ? "bg-red-500 text-white hover:bg-red-600" : "bg-lime-300 hover:bg-lime-400"}`}>
+          {live && call.agentSpeaking && <span className="pulse-ring absolute inset-0 rounded-full border-2 border-lime-400" aria-hidden="true" />}
           <Icon name={live ? "close" : "mic"} className="h-10 w-10" />
         </button>
-        <p className="mt-4 text-lg font-semibold text-white">{live ? "End call" : "Talk to Priya"}</p>
-        <p className="mt-1 text-sm text-gray-400" role="status">{status}</p>
+        <p className="mt-4 text-lg font-semibold text-gray-900">{live ? "End call" : "Talk to Priya"}</p>
+        <p className="mt-1 text-sm text-gray-600" role="status">{status}</p>
 
         <div className="mt-4 flex h-8 items-end gap-1" aria-hidden="true">
           {[0.5, 0.8, 1, 0.7, 0.9, 0.6, 1, 0.75, 0.55].map((h, i) => (
-            <span key={i} className={`w-1.5 rounded-full ${live && call.agentSpeaking ? "voice-bar bg-indigo-400" : "bg-gray-700"}`}
+            <span key={i} className={`w-1.5 rounded-full ${live && call.agentSpeaking ? "voice-bar bg-lime-600" : "bg-gray-300"}`}
               style={{ height: `${h * 100}%`, animationDelay: `${i * 90}ms` }} />
           ))}
         </div>
       </div>
 
-      {call.error && <p role="alert" className="mt-4 rounded-lg border border-red-800 bg-red-900/30 px-3 py-2 text-sm text-red-200">{call.error}</p>}
+      {call.error && <p role="alert" className="mt-4 rounded-lg border border-red-200 bg-red-100/30 px-3 py-2 text-sm text-red-800">{call.error}</p>}
 
-      <div className="mt-6 border-t border-gray-800 pt-4">
-        <p className="text-xs text-gray-400">Try saying</p>
+      <div className="mt-6 border-t border-white/70 pt-4">
+        <p className="text-xs text-gray-600">Try saying</p>
         <ul className="mt-2 flex flex-wrap gap-2">
           {TRY_SAYING.map((line) => (
-            <li key={line} className="rounded-full border border-gray-700 px-3 py-1 text-xs text-gray-300">“{line}”</li>
+            <li key={line} className="rounded-full border border-gray-300 px-3 py-1 text-xs text-gray-700">“{line}”</li>
           ))}
         </ul>
         <p className="mt-3 text-xs text-gray-500">Uses your microphone. The agent says it is an AI assistant at the start of the call.</p>

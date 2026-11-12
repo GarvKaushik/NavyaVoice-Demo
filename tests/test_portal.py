@@ -18,7 +18,7 @@ from campaign.knowledge_ingest import DocumentError, parse_document
 from campaign.outcomes import conclusion_for
 from config.settings import get_settings
 from database.models import (CallRecord, Campaign, CatalogItem, Client, CRMOutbox, DialJob, DNDEntry,
-                             GLOBAL_DND_CLIENT, Lead, MinuteLedger, Plan, Playbook, User)
+                             GLOBAL_DND_CLIENT, Lead, MinuteLedger, Plan, Playbook, User, utcnow)
 from database.session import AsyncSessionLocal
 from guardrails.authorization import AuthorizationContext
 from integrations.crm_webhook import deliver_pending, sign
@@ -147,6 +147,26 @@ async def test_client_responses_hide_internal_costs():
     assert body["conclusion_label"] == "Ready"
 
 
+async def test_call_results_show_totals_per_campaign():
+    client = await make_client()
+    camp_a, camp_b = await make_campaign(client), await make_campaign(client)
+    answered = utcnow()
+    for outcome in ("demo_booked", "not_interested"):
+        await make_call(client, camp_a, await make_lead(client, camp_a), status="ended", outcome=outcome,
+                        answered_at=answered, duration_seconds=60, client_billed_seconds=60)
+    await make_call(client, camp_b, await make_lead(client, camp_b), status="ended", outcome="no_answer")
+    http = await signed_in("client", client)
+
+    body = (await http.get("/api/client/calls", params={"campaign_id": camp_a})).json()
+    assert body["total"] == 2 and {c["campaign_id"] for c in body["calls"]} == {camp_a}
+    totals = {t["campaign_id"]: t for t in body["campaigns"]}  # every campaign, for the picker
+    assert totals[camp_a] == {"campaign_id": camp_a, "calls": 2, "answered": 2, "ready": 1, "talk_seconds": 120,
+                              "billed_minutes": 2.0}
+    assert totals[camp_b]["calls"] == 1 and totals[camp_b]["answered"] == 0
+    counts = {c["key"]: c["count"] for c in body["conclusions"]}  # only the chosen campaign
+    assert counts["ready"] == 1 and counts["refused"] == 1 and counts["contact_again"] == 0
+
+
 async def test_operator_endpoints_require_admin_in_production(monkeypatch):
     client = await make_client()
     settings = get_settings()
@@ -223,6 +243,25 @@ async def test_campaign_knowledge_is_the_clients_own():
 
     engine = DialogueEngine(CallIdentity("c", "l", camp_a, "+919", "R", client_id=a), k, None)
     assert f"Company {a}" in engine.opening()[0].text
+    assert k.other_services == []
+
+
+async def test_campaign_knows_the_clients_other_services_but_sells_only_its_own():
+    client = await make_client()
+    camp = await make_campaign(client)
+    other = _id("client")
+    async with AsyncSessionLocal() as db:
+        db.add(Client(id=other, name=other, company_name="Other"))
+        await db.flush()
+        for owner, sku, plan, active in ((client, "Y", "Monthly", True), (client, "Y", "Annual", True),
+                                         (client, "Z", "Monthly", False), (other, "W", "Monthly", True)):
+            db.add(CatalogItem(client_id=owner, sku=sku, plan=plan, version=1, name=f"Service {sku}", price_inr=1,
+                               billing_period="monthly", description=f"Service {sku} ek tool hai. Aur bhi.",
+                               is_active=active))
+        await db.commit()
+    k = await load_knowledge(camp)
+    assert k.other_services == ["Service Y: Service Y ek tool hai."]  # once per service, active and own only
+    assert {c.sku for c in k.catalog.values()} == {"X"}  # tools still sell only the campaign's product
 
 
 # ------------------------------------------------------------------------------
@@ -545,6 +584,27 @@ async def test_new_client_setup_through_admin_api():
     started = (await http.post(f"/api/client/campaigns/{campaign['id']}/start")).json()
     assert started == {"status": "active", "queued": 1}
     assert (await http.post(f"/api/client/campaigns/{campaign['id']}/start")).json()["queued"] == 0  # no double queueing
+
+
+async def test_one_product_with_several_plans_saves_its_delivery_time_once():
+    admin = await signed_in("admin")
+    client_id = (await admin.post("/api/admin/clients", json={"name": "Multi", "company_name": "Multi Ltd"})).json()["id"]
+    eta = "10 minute mein online activation"
+    content = {"products": [
+        {"sku": "CRM-PRO", "plan": "Monthly", "name": "Pro", "price_inr": 999, "eta_text": eta},
+        {"sku": "CRM-PRO", "plan": "Yearly", "name": "Pro", "price_inr": 9999, "billing_period": "yearly", "eta_text": eta},
+        {"sku": "CRM-STARTER", "plan": "Monthly", "name": "Starter", "price_inr": 499, "eta_text": eta},
+    ]}
+    for _ in range(2):  # saving the same content again must also work
+        assert (await admin.put(f"/api/admin/clients/{client_id}/content", json=content)).status_code == 200
+    async with AsyncSessionLocal() as db:
+        plans = (await db.execute(select(CatalogItem).where(CatalogItem.client_id == client_id,
+                                                            CatalogItem.is_active.is_(True)))).scalars().all()
+    assert sorted((p.sku, p.plan, p.price_inr) for p in plans) == [
+        ("CRM-PRO", "Monthly", 999), ("CRM-PRO", "Yearly", 9999), ("CRM-STARTER", "Monthly", 499)]
+    too_long = {"products": [{"sku": "X", "name": "X", "price_inr": 1, "eta_text": "x" * 129}]}
+    reply = await admin.put(f"/api/admin/clients/{client_id}/content", json=too_long)
+    assert reply.status_code == 422 and "eta_text" in str(reply.json()["detail"])
 
 
 async def test_post_call_summary_is_stored_and_not_repeated():

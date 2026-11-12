@@ -12,26 +12,26 @@ interface Props {
 
 export default function GuardMonitor({ guardStatus, fastPathIntent, toolResult }: Props) {
   return (
-    <div className="bg-gray-900/60 backdrop-blur rounded-xl p-4 border border-gray-800 space-y-3">
-      <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+    <div className="glass rounded-xl p-4 border border-white/70 space-y-3">
+      <h3 className="text-xs font-semibold text-gray-600 uppercase tracking-wider">
         🛡️ Guard Monitor
       </h3>
 
       {/* Output Guard Status */}
       <div className="flex items-center gap-2">
         <div className={`w-2.5 h-2.5 rounded-full ${
-          guardStatus === null ? "bg-gray-600" : guardStatus.passed ? "bg-green-500" : "bg-red-500"
+          guardStatus === null ? "bg-gray-400" : guardStatus.passed ? "bg-green-500" : "bg-red-500"
         }`} />
-        <span className="text-sm text-gray-300">
+        <span className="text-sm text-gray-700">
           Output Guard: {guardStatus === null ? "Waiting" : guardStatus.passed ? "Passed ✓" : "Blocked ✗"}
         </span>
       </div>
 
       {/* Guard rejection reasons */}
       {guardStatus && !guardStatus.passed && guardStatus.reasons.length > 0 && (
-        <div className="bg-red-900/20 border border-red-800 rounded-lg px-3 py-2">
-          <p className="text-xs text-red-300 font-medium mb-1">Rejection Reasons:</p>
-          <ul className="text-xs text-red-400 space-y-0.5">
+        <div className="bg-red-100/20 border border-red-200 rounded-lg px-3 py-2">
+          <p className="text-xs text-red-700 font-medium mb-1">Rejection Reasons:</p>
+          <ul className="text-xs text-red-600 space-y-0.5">
             {guardStatus.reasons.map((r, i) => (
               <li key={i}>• {r}</li>
             ))}
@@ -45,7 +45,7 @@ export default function GuardMonitor({ guardStatus, fastPathIntent, toolResult }
           <p className="text-xs text-gray-500 mb-1">Authorized Numbers:</p>
           <div className="flex flex-wrap gap-1">
             {guardStatus.authorized_numbers.map((n) => (
-              <span key={n} className="text-[10px] bg-gray-800 text-gray-300 px-2 py-0.5 rounded-full font-mono">
+              <span key={n} className="text-[10px] bg-black/5 text-gray-700 px-2 py-0.5 rounded-full font-mono">
                 {n}
               </span>
             ))}
@@ -55,19 +55,19 @@ export default function GuardMonitor({ guardStatus, fastPathIntent, toolResult }
 
       {/* Fast Path Intent */}
       <div className="flex items-center gap-2">
-        <div className={`w-2.5 h-2.5 rounded-full ${fastPathIntent ? "bg-amber-500" : "bg-gray-600"}`} />
-        <span className="text-sm text-gray-300">
+        <div className={`w-2.5 h-2.5 rounded-full ${fastPathIntent ? "bg-amber-500" : "bg-gray-400"}`} />
+        <span className="text-sm text-gray-700">
           Fast-Path: {fastPathIntent ? (
-            <span className="text-amber-300 font-medium">{fastPathIntent}</span>
+            <span className="text-amber-700 font-medium">{fastPathIntent}</span>
           ) : "None"}
         </span>
       </div>
 
       {/* Tool Result */}
       {toolResult && (
-        <div className="bg-blue-900/20 border border-blue-800 rounded-lg px-3 py-2">
-          <p className="text-xs text-blue-300 font-medium mb-1">🔧 Tool Result:</p>
-          <pre className="text-[11px] text-blue-200 whitespace-pre-wrap overflow-x-auto font-mono">
+        <div className="bg-blue-100/20 border border-blue-200 rounded-lg px-3 py-2">
+          <p className="text-xs text-blue-700 font-medium mb-1">🔧 Tool Result:</p>
+          <pre className="text-[11px] text-blue-800 whitespace-pre-wrap overflow-x-auto font-mono">
             {JSON.stringify(toolResult, null, 2)}
           </pre>
         </div>

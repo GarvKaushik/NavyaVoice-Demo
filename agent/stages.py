@@ -169,12 +169,26 @@ CALL_FLOW: Dict[CallStep, StepPlan] = {
         "They said no to your offer. Say 'koi baat nahi', give one short benefit from PRODUCT INTRO, and ask once more "
         "if it is worth a look. Under 20 words.")),
     CallStep.EXPLAIN: StepPlan(SalesStage.PITCH, goal=(
-        "Explain what the product does for them in one line under 20 words, saying something new each time. "
+        "The customer has never heard of the product. In up to 3 sentences and about 45 words: (1) a short first "
+        "sentence naming the product and what kind of product it is, like '<product name> ek software hai jo ...'; "
+        "(2) who it is for and one or two real benefits for them from PRODUCT INTRO and KEY FEATURES. If you already "
+        "explained it, skip (1) and say a new benefit instead of repeating. "
         "End with a short check like 'aapke kaam ka lagta hai?'. Never ask what else they want to know.")),
     CallStep.PRICE: StepPlan(SalesStage.CLOSE_NEXT_STEP),  # code speaks the catalog price, then the model offers the next step
     CallStep.NEXT_STEP: StepPlan(SalesStage.CLOSE_NEXT_STEP),
     CallStep.DECLINED: StepPlan(SalesStage.OPENING),  # code plays the polite close and ends the call
 }
+
+
+# Replaces the OFFER goal when the client has written a company introduction (the INTRODUCTION script entry):
+# the company comes first, and the main product is named on the next step.
+OFFER_WITH_COMPANY_INTRO = (
+    "The customer is {name} and has just answered how they are. Do not ask who they are. Say, in up to 3 short "
+    "sentences and about 45 words: (1) a warm reaction in 2-3 words, and if they asked how you are, say you are fine; "
+    "(2) 'Main {company} se bol rahi hoon' and what the company does, in one or two lines from COMPANY INTRO, "
+    "without reading out every service; (3) ask for two minutes of their time with exactly this phrasing: "
+    "'Kya main aapke do minute le sakti hoon, ek service ke baare mein batane ke liye jo aapke business mein help kar "
+    "sakti hai?' (never 'do minute de sakti hoon'). Do not name the product yet. No price or features.")
 
 
 class StageManager:
@@ -270,10 +284,18 @@ class StageManager:
                 return CallStep.PRICE
         return self.step
 
-    def goal_for_step(self, name: str, company: str) -> str:
+    def goal_for_step(self, name: str, company: str, company_intro: bool = False) -> str:
         """The model's instruction for the current step, while the call is on its fixed path."""
         plan = CALL_FLOW[self.step]
-        return plan.goal.format(name=name, company=company) if plan.stage == self.current_stage else ""
+        if plan.stage != self.current_stage:
+            return ""
+        goal = OFFER_WITH_COMPANY_INTRO if company_intro and self.step == CallStep.OFFER else plan.goal
+        return goal.format(name=name, company=company)
+
+    def is_long_turn(self, company_intro: bool = False) -> bool:
+        """Turns that explain something new get more words: the pitch, and the company introduction."""
+        return self.current_stage == SalesStage.PITCH or (
+            company_intro and self.current_stage == SalesStage.OPENING and self.step == CallStep.OFFER)
 
     def line_for_step(self, name: str) -> Optional[str]:
         plan = CALL_FLOW[self.step]

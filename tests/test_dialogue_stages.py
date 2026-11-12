@@ -104,6 +104,6 @@ def test_cost_calculator_pulse_accounting(monkeypatch):
                                             llm_input_tokens=12000, llm_cached_tokens=8000, llm_output_tokens=300,
                                             on=date(2026, 12, 1))
     assert cost.billed_minutes == 2  # 60 s pulse
-    assert cost.telephony_inr == round(2 * 0.45, 4)
+    assert cost.telephony_inr == round(2 * get_settings().PLIVO_RATE_PER_MINUTE_INR, 4)
     assert cost.tts_inr == round(350 / 10000 * 20, 4)  # standard rate after the promotion
     assert cost.total_inr > cost.telephony_inr

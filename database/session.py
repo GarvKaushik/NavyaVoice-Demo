@@ -2,9 +2,15 @@
 
 Engines are created lazily so tests and tools can point the app at another
 database (e.g. SQLite) with `configure_database(url)` before first use.
+
+Each event loop gets its own engines. Pooled asyncpg connections belong to the loop that opened them, and the
+call worker runs every call on a loop of its own (in a thread on Windows), so one shared pool fails from the
+second call on.
 """
 
+import asyncio
 import os
+import weakref
 from typing import AsyncGenerator, Optional
 
 from sqlalchemy.ext.asyncio import (
@@ -19,10 +25,9 @@ from config.settings import get_settings
 
 Base = declarative_base()
 
-_engine: Optional[AsyncEngine] = None
-_read_engine: Optional[AsyncEngine] = None
-_sessionmaker: Optional[async_sessionmaker] = None
-_read_sessionmaker: Optional[async_sessionmaker] = None
+_urls: Optional[tuple] = None  # (url, read_url) given to configure_database
+_by_loop: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()  # event loop -> its engines
+_no_loop: Optional[dict] = None  # engines used outside any event loop
 
 
 def _make_engine(url: str) -> AsyncEngine:
@@ -42,36 +47,58 @@ def _make_engine(url: str) -> AsyncEngine:
 
 
 def configure_database(url: Optional[str] = None, read_url: Optional[str] = None) -> None:
-    """(Re)creates engines. Called implicitly on first use with settings values."""
-    global _engine, _read_engine, _sessionmaker, _read_sessionmaker
+    """Points the app at a database. Engines are created per event loop on first use."""
+    global _urls, _no_loop
+    _urls = (url, read_url)
+    _by_loop.clear()
+    _no_loop = None
+
+
+def _build(url: Optional[str], read_url: Optional[str]) -> dict:
     settings = get_settings()
-    _engine = _make_engine(url or settings.DATABASE_URL)
-    _sessionmaker = async_sessionmaker(bind=_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
+    engine = _make_engine(url or settings.DATABASE_URL)
+    bundle = {"engine": engine, "read_engine": None, "read_sessionmaker": None,
+              "sessionmaker": async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False,
+                                                 autoflush=False)}
     replica = read_url if read_url is not None else settings.DATABASE_READ_URL
     if replica and not (url or "").startswith("sqlite"):
-        _read_engine = _make_engine(replica)
-        _read_sessionmaker = async_sessionmaker(bind=_read_engine, class_=AsyncSession, expire_on_commit=False)
-    else:
-        _read_engine, _read_sessionmaker = None, None
+        bundle["read_engine"] = _make_engine(replica)
+        bundle["read_sessionmaker"] = async_sessionmaker(bind=bundle["read_engine"], class_=AsyncSession,
+                                                         expire_on_commit=False)
+    return bundle
+
+
+def _bundle() -> dict:
+    """The engines that belong to the running event loop."""
+    global _no_loop
+    if _urls is None:
+        configure_database()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None:
+        if _no_loop is None:
+            _no_loop = _build(*_urls)
+        return _no_loop
+    bundle = _by_loop.get(loop)
+    if bundle is None:
+        bundle = _by_loop[loop] = _build(*_urls)
+    return bundle
 
 
 def get_engine() -> AsyncEngine:
-    if _engine is None:
-        configure_database()
-    return _engine
+    return _bundle()["engine"]
 
 
 def get_sessionmaker() -> async_sessionmaker:
-    if _sessionmaker is None:
-        configure_database()
-    return _sessionmaker
+    return _bundle()["sessionmaker"]
 
 
 def get_read_sessionmaker() -> async_sessionmaker:
     """Read replica when configured, otherwise the primary."""
-    if _sessionmaker is None:
-        configure_database()
-    return _read_sessionmaker or _sessionmaker
+    bundle = _bundle()
+    return bundle["read_sessionmaker"] or bundle["sessionmaker"]
 
 
 def AsyncSessionLocal() -> AsyncSession:
@@ -104,6 +131,8 @@ async def init_db() -> None:
 
 
 async def dispose_engines() -> None:
-    for engine in (_engine, _read_engine):
+    """Closes the running loop's engines (another loop's connections can only be closed on that loop)."""
+    bundle = _bundle()
+    for engine in (bundle["engine"], bundle["read_engine"]):
         if engine is not None:
             await engine.dispose()

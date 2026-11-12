@@ -151,6 +151,12 @@ class SalesAgent(Agent):
         self.call = call
 
     async def on_enter(self) -> None:
+        # Browser and console calls: the person is already listening. Phone calls start before dialing, so the
+        # greeting (with the AI disclosure) waits until the customer answers; see entrypoint.
+        if self.call.console:
+            self.speak_opening()
+
+    def speak_opening(self) -> None:
         for u in self.engine.opening():
             self.session.say(u.text, allow_interruptions=False)
         self.call.recorder.mark_disclosure()
@@ -466,11 +472,36 @@ class CallSession:
 
 
 # ------------------------------------------------------------------------------
-server = AgentServer(
-    drain_timeout=settings.WORKER_DRAIN_TIMEOUT_SECONDS,
-    load_threshold=0.95,
-    num_idle_processes=2,
-)
+def _server_options() -> dict:
+    options = {"drain_timeout": settings.WORKER_DRAIN_TIMEOUT_SECONDS, "load_threshold": 0.95, "num_idle_processes": 2}
+    if settings.WORKER_JOB_EXECUTOR:
+        from livekit.agents import JobExecutorType
+
+        options["job_executor_type"] = JobExecutorType(settings.WORKER_JOB_EXECUTOR)
+    return options
+
+
+server = AgentServer(**_server_options())
+
+
+# Sample-rate pairs the calls resample between: phone 8 kHz, STT 8/16 kHz, TTS 8/24 kHz, WebRTC 48 kHz
+_RESAMPLE_PAIRS = [(48000, 8000), (48000, 16000), (8000, 48000), (16000, 48000), (24000, 48000), (24000, 8000),
+                   (22050, 48000)]
+
+
+def prime_audio_resamplers() -> None:
+    """Sets up the native resampler's shared tables once, on the main thread, before any call starts. With calls
+    running as threads (Windows), two streams creating their first resampler at the same moment can otherwise race
+    on those tables and abort inside livekit_ffi."""
+    for source, target in _RESAMPLE_PAIRS:
+        try:
+            resampler = rtc.AudioResampler(source, target, num_channels=1)
+            samples = source // 50  # 20 ms
+            resampler.push(rtc.AudioFrame(data=b"\0\0" * samples, sample_rate=source, num_channels=1,
+                                          samples_per_channel=samples))
+            resampler.flush()
+        except Exception as e:
+            logger.debug(f"resampler warm-up {source}->{target} skipped: {e!r}")
 
 
 def prewarm(proc: JobProcess) -> None:
@@ -596,6 +627,8 @@ async def entrypoint(ctx: JobContext) -> None:
     if outcome != "answered":
         await call.recorder.finalize_unanswered(outcome)
         await call.hangup()
+        return
+    agent.speak_opening()  # only now is someone on the line to hear the disclosure
 
 
 async def dial_customer(ctx: JobContext, session: AgentSession, identity: CallIdentity, meta: dict,
@@ -632,4 +665,5 @@ async def dial_customer(ctx: JobContext, session: AgentSession, identity: CallId
 
 
 if __name__ == "__main__":
+    prime_audio_resamplers()
     cli.run_app(server)

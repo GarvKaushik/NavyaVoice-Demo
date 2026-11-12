@@ -62,3 +62,9 @@ tts_check.wav
 
 deploy/
 SETUP.md
+
+# Voice listening tests (python -m modal run deploy/modal_tts.py::samples)
+assets/*_voices/
+
+# LiveKit SIP trunk file (holds the provider password)
+outbound-trunk.json

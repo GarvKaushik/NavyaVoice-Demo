@@ -33,16 +33,20 @@ def test_defaults_need_only_openai():
     assert fields["STT_FALLBACK_TO_SARVAM"].default is False
 
 
-def test_default_build_never_loads_the_sarvam_plugin():
+def test_default_build_never_loads_the_sarvam_plugin(tmp_path):
+    import os
     import subprocess
     import sys
 
-    env = {k: v for k, v in __import__("os").environ.items() if not k.endswith("_PROVIDER")}
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = {k: v for k, v in os.environ.items() if not k.endswith("_PROVIDER")}
+    env["PYTHONPATH"] = repo  # run outside the repo, so a developer's own .env doesn't change the defaults
     code = ("import sys, agent.worker as w; "
             "assert 'livekit.plugins.sarvam' not in sys.modules; "
             "assert w.settings.STT_PROVIDER != 'sarvam' and w.settings.TTS_PROVIDER == 'piper'; "
             "print('clean')")
-    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120)
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120,
+                         cwd=str(tmp_path))
     assert "clean" in out.stdout, out.stderr[-500:]
 
 
@@ -106,6 +110,19 @@ def _set(monkeypatch, **values):
     for key, value in values.items():
         monkeypatch.setattr(s, key, value)
     return s
+
+
+async def test_phone_calls_greet_only_after_the_customer_answers(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent import worker
+
+    spoken = []
+    monkeypatch.setattr(worker.SalesAgent, "speak_opening", lambda self: spoken.append(self.call.console))
+    for console in (False, True):
+        agent = worker.SalesAgent(None, None, None, SimpleNamespace(console=console))
+        await agent.on_enter()
+    assert spoken == [True]  # the phone call (console=False) waits for the answer; the browser call greets at once
 
 
 def test_worker_picks_the_stt_from_settings(monkeypatch):

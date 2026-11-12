@@ -3,7 +3,7 @@
  * knowledge documents, test calls, opt-outs and credit requests.
  * An admin can open the same screens for any client.
  * ─────────────────────────────────────────────────────────── */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { del, formatDuration, formatNumber, formatTime, post, scoped, upload } from "./api";
 import type { Row } from "./api";
@@ -33,6 +33,7 @@ export default function ClientApp({ clientId, title, subtitle, onSignOut, onExit
   const route = hashRoute.startsWith(prefix) ? hashRoute.slice(prefix.length) : "overview";
   const { data: overview, reload } = useData<Row>(scoped("/client/overview", clientId));
   const [conclusion, setConclusion] = useState("");
+  const [campaign, setCampaign] = useState("");
 
   return (
     <Shell
@@ -45,17 +46,21 @@ export default function ClientApp({ clientId, title, subtitle, onSignOut, onExit
       badge={onExit && <Button variant="secondary" onClick={onExit}>Back to admin</Button>}
       footer={overview && (
         <SidebarBox label="Minutes left" value={formatNumber(overview.minutes.remaining)}
-          action={<Button variant="secondary" className="w-full" onClick={() => navigate(`${prefix}credits`)}>Request more minutes</Button>} />
+          action={<Button className="w-full" onClick={() => navigate(`${prefix}credits`)}>Request more minutes</Button>} />
       )}
     >
       {overview?.minutes.out_of_minutes && (
         <Message error="You are out of minutes, so new calls are paused. Request more credits and calling resumes once they are approved." />
       )}
       {route === "overview" && (
-        <Overview overview={overview} clientId={clientId} onChoose={(key) => { setConclusion(key); navigate(`${prefix}calls`); }} />
+        <Overview overview={overview} clientId={clientId} onChoose={(key) => { setCampaign(""); setConclusion(key); navigate(`${prefix}calls`); }} />
       )}
-      {route === "calls" && <Calls clientId={clientId} conclusion={conclusion} setConclusion={setConclusion} />}
-      {route === "campaigns" && <Campaigns clientId={clientId} />}
+      {route === "calls" && (
+        <Calls clientId={clientId} campaignId={campaign} setCampaignId={setCampaign} conclusion={conclusion} setConclusion={setConclusion} />
+      )}
+      {route === "campaigns" && (
+        <Campaigns clientId={clientId} onViewCalls={(id) => { setCampaign(id); setConclusion(""); navigate(`${prefix}calls`); }} />
+      )}
       {route === "knowledge" && <Knowledge clientId={clientId} />}
       {route === "test" && overview && (
         <TestCall clientId={clientId} used={overview.test_call.used_minutes} limit={overview.test_call.monthly_limit} />
@@ -86,13 +91,13 @@ function Overview({ overview, clientId, onChoose }: { overview: Row | null; clie
       </div>
 
       <Card title="Minutes">
-        <div className="flex justify-between text-xs text-gray-400 mb-1.5">
+        <div className="flex justify-between text-xs text-gray-600 mb-1.5">
           <span>{formatNumber(minutes.remaining)} remaining</span>
           <span>{formatNumber(minutes.total_granted)} granted in total</span>
         </div>
-        <div className="h-2 rounded-full bg-gray-800 overflow-hidden" role="img"
+        <div className="h-2 rounded-full bg-black/5 overflow-hidden" role="img"
           aria-label={`${Math.round(share * 100)} percent of minutes remaining`}>
-          <div className={`h-full rounded-full ${low ? "bg-amber-400" : "bg-indigo-400"}`} style={{ width: `${share * 100}%` }} />
+          <div className={`h-full rounded-full ${low ? "bg-amber-600" : "bg-lime-600"}`} style={{ width: `${share * 100}%` }} />
         </div>
         {plan && (
           <p className="mt-2 text-xs text-gray-500">
@@ -107,13 +112,13 @@ function Overview({ overview, clientId, onChoose }: { overview: Row | null; clie
           <ul className="space-y-1">
             {conclusions.map((c) => (
               <li key={c.key}>
-                <button onClick={() => onChoose(c.key)} className="w-full rounded px-1 py-1 text-left hover:bg-gray-800/60">
+                <button onClick={() => onChoose(c.key)} className="w-full rounded px-1 py-1 text-left hover:bg-white/60">
                   <div className="flex justify-between text-sm">
-                    <span className="text-gray-200">{c.label}</span>
-                    <span className="text-gray-200 tabular-nums">{formatNumber(c.count)}</span>
+                    <span className="text-gray-800">{c.label}</span>
+                    <span className="text-gray-800 tabular-nums">{formatNumber(c.count)}</span>
                   </div>
-                  <div className="mt-1 h-1.5 rounded-full bg-gray-800">
-                    {c.count > 0 && <div className="h-full rounded-full bg-indigo-400" style={{ width: `${(c.count / largest) * 100}%` }} />}
+                  <div className="mt-1 h-1.5 rounded-full bg-black/5">
+                    {c.count > 0 && <div className="h-full rounded-full bg-lime-600" style={{ width: `${(c.count / largest) * 100}%` }} />}
                   </div>
                 </button>
               </li>
@@ -150,16 +155,16 @@ function UsageChart({ clientId }: { clientId?: string }) {
     <Card title="Minutes used per day, last 30 days">
       {!rows.length ? <Empty>No calls in the last 30 days.</Empty> : (
         <>
-          <p className="h-5 text-xs text-gray-300 tabular-nums">
+          <p className="h-5 text-xs text-gray-700 tabular-nums">
             {hover ? `${label(hover.date)}: ${formatNumber(hover.minutes, 1)} min, ${formatNumber(hover.calls)} calls`
               : `Highest day: ${formatNumber(peak, 1)} min`}
           </p>
-          <div className="mt-2 h-32 flex items-end gap-0.5 border-b border-gray-700" onMouseLeave={() => setHover(null)}>
+          <div className="mt-2 h-32 flex items-end gap-0.5 border-b border-gray-300" onMouseLeave={() => setHover(null)}>
             {rows.map((r) => (
               <div key={r.date} className="group flex-1 h-full flex items-end" onMouseEnter={() => setHover(r)}
                 title={`${label(r.date)}: ${formatNumber(r.minutes, 1)} min`}>
                 {r.minutes > 0 && (
-                  <div className="w-full max-w-4 mx-auto rounded-t bg-indigo-400 group-hover:bg-indigo-300"
+                  <div className="w-full max-w-4 mx-auto rounded-t bg-lime-600 group-hover:bg-lime-700"
                     style={{ height: `${Math.max((r.minutes / peak) * 100, 2)}%` }} />
                 )}
               </div>
@@ -169,7 +174,7 @@ function UsageChart({ clientId }: { clientId?: string }) {
             <span>{label(rows[0].date)}</span>
             <span>{label(rows[rows.length - 1].date)}</span>
           </div>
-          <details className="mt-2 text-xs text-gray-400">
+          <details className="mt-2 text-xs text-gray-600">
             <summary className="cursor-pointer">Show as table</summary>
             <table className="mt-2 w-full">
               <tbody>
@@ -186,27 +191,104 @@ function UsageChart({ clientId }: { clientId?: string }) {
 }
 
 // ── Call results ─────────────────────────────────────────────
-const CONCLUSION_FILTERS = [
-  ["", "All"], ["ready", "Ready"], ["refused", "Refused"], ["contact_again", "Contact again"],
-  ["manager", "Talk to manager"], ["unclear", "Unclear"], ["other", "Not reached / other"],
-];
+const CONCLUSION_STYLES: Record<string, string> = {
+  ready: "border-green-200 bg-green-100/40 text-green-700",
+  refused: "border-red-100 bg-red-100/30 text-red-700",
+  contact_again: "border-amber-100 bg-amber-100/30 text-amber-700",
+  manager: "border-sky-100 bg-sky-100/30 text-sky-700",
+  unclear: "border-gray-300 bg-black/5 text-gray-700",
+  other: "border-white/70 bg-white text-gray-600",
+};
 const PAGE_SIZE = 50;
 
-function Calls({ clientId, conclusion, setConclusion }: { clientId?: string; conclusion: string; setConclusion: (c: string) => void }) {
+function ResultTag({ conclusion, label }: { conclusion: string; label: string }) {
+  return (
+    <span className={`inline-block whitespace-nowrap rounded-full border px-2 py-0.5 text-xs ${CONCLUSION_STYLES[conclusion] ?? CONCLUSION_STYLES.other}`}>
+      {label}
+    </span>
+  );
+}
+
+const percent = (part: number, whole: number) => (whole ? `${Math.round((part / whole) * 100)}%` : "—");
+
+/** Adds up campaign totals into one row for "All campaigns". */
+function sumTotals(rows: Row[]): Row {
+  const total: Row = { calls: 0, answered: 0, ready: 0, talk_seconds: 0, billed_minutes: 0 };
+  for (const r of rows) for (const key of Object.keys(total)) total[key] += r[key] ?? 0;
+  return total;
+}
+
+function Calls({ clientId, campaignId, setCampaignId, conclusion, setConclusion }: {
+  clientId?: string;
+  campaignId: string;
+  setCampaignId: (id: string) => void;
+  conclusion: string;
+  setConclusion: (c: string) => void;
+}) {
   const [offset, setOffset] = useState(0);
   const [openId, setOpenId] = useState<string | null>(null);
-  const query = `/client/calls?limit=${PAGE_SIZE}&offset=${offset}${conclusion ? `&conclusion=${conclusion}` : ""}`;
-  const { data, error } = useData<Row>(scoped(query, clientId));
+  const { data: campaignList } = useData<Row[]>(scoped("/client/campaigns", clientId));
+  const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
+  if (campaignId) params.set("campaign_id", campaignId);
+  if (conclusion) params.set("conclusion", conclusion);
+  const { data, error } = useData<Row>(scoped(`/client/calls?${params}`, clientId));
+
+  const totals = new Map<string, Row>((data?.campaigns ?? []).map((t: Row) => [t.campaign_id, t]));
+  const names = new Map<string, string>((campaignList ?? []).map((c) => [c.id, c.name]));
+  const choices = [
+    { id: "", name: "All campaigns", status: "", t: sumTotals(data?.campaigns ?? []) },
+    ...(campaignList ?? [])
+      .map((c) => ({ id: c.id as string, name: c.name as string, status: c.status as string, t: totals.get(c.id) }))
+      .sort((a, b) => (b.t?.calls ?? 0) - (a.t?.calls ?? 0)),
+  ];
+  const current = choices.find((c) => c.id === campaignId)?.t ?? sumTotals([]);
+  const resultCounts: Row[] = data?.conclusions ?? [];
+  const allResults = resultCounts.reduce((sum, c) => sum + c.count, 0);
+
+  const chooseCampaign = (id: string) => { setCampaignId(id); setConclusion(""); setOffset(0); };
+  const chooseResult = (key: string) => { setConclusion(key); setOffset(0); };
+  const chip = (active: boolean) =>
+    `rounded-full px-3 py-1 text-xs transition-colors ${active ? "bg-neutral-900 text-white" : "bg-black/5 text-gray-700 hover:text-gray-900"}`;
 
   return (
     <>
-      {openId && <CallDetail callId={openId} clientId={clientId} onClose={() => setOpenId(null)} />}
-      <Card>
+      {openId && (
+        <CallDetail callId={openId} clientId={clientId} campaignNames={names} onClose={() => setOpenId(null)} />
+      )}
+
+      <div role="tablist" aria-label="Campaign" className="flex gap-2 overflow-x-auto pb-1">
+        {choices.map((c) => {
+          const active = c.id === campaignId;
+          return (
+            <button key={c.id || "all"} role="tab" aria-selected={active} onClick={() => chooseCampaign(c.id)}
+              className={`w-52 shrink-0 rounded-2xl border px-4 py-3 text-left transition-colors ${
+                active ? "border-neutral-900 bg-white" : "border-white/70 glass hover:border-gray-400"}`}>
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate text-sm font-medium text-gray-900" title={c.name}>{c.name}</span>
+                {c.status && <StatusTag status={c.status} />}
+              </div>
+              <p className="mt-1 text-xs text-gray-600 tabular-nums">
+                {formatNumber(c.t?.calls ?? 0)} calls · {formatNumber(c.t?.ready ?? 0)} ready
+              </p>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Stat label="Calls" value={formatNumber(current.calls)} />
+        <Stat label="Answered" value={formatNumber(current.answered)} note={`${percent(current.answered, current.calls)} of calls`} />
+        <Stat label="Ready" value={formatNumber(current.ready)} note={`${percent(current.ready, current.answered)} of answered calls`} />
+        <Stat label="Talk time" value={`${formatNumber(current.talk_seconds / 60, 1)} min`}
+          note={`${formatNumber(current.billed_minutes, 1)} billed minutes`} />
+      </div>
+
+      <Card title={campaignId ? `Calls in ${names.get(campaignId) ?? "this campaign"}` : "Calls in all campaigns"}>
         <div className="mb-3 flex flex-wrap gap-1">
-          {CONCLUSION_FILTERS.map(([key, label]) => (
-            <button key={key} onClick={() => { setConclusion(key); setOffset(0); }}
-              className={`rounded-full px-3 py-1 text-xs ${conclusion === key ? "bg-indigo-600 text-white" : "bg-gray-800 text-gray-300 hover:text-white"}`}>
-              {label}
+          <button onClick={() => chooseResult("")} className={chip(conclusion === "")}>All · {formatNumber(allResults)}</button>
+          {resultCounts.map((c) => (
+            <button key={c.key} onClick={() => chooseResult(c.key)} className={chip(conclusion === c.key)}>
+              {c.label} · {formatNumber(c.count)}
             </button>
           ))}
         </div>
@@ -214,20 +296,25 @@ function Calls({ clientId, conclusion, setConclusion }: { clientId?: string; con
         <Table<Row>
           rows={data?.calls ?? []}
           rowKey={(r) => r.call_id}
-          onRowClick={(r) => { setOpenId(r.call_id); window.scrollTo({ top: 0, behavior: "smooth" }); }}
-          empty="No calls here yet."
+          onRowClick={(r) => setOpenId(r.call_id)}
+          empty={campaignId ? "No finished calls in this campaign yet." : "No calls here yet."}
           columns={[
-            { label: "Time", render: (r) => formatTime(r.start_time) },
-            { label: "Customer", render: (r) => r.customer_name },
-            { label: "Number", render: (r) => r.phone_number },
-            { label: "Result", render: (r) => r.conclusion_label },
-            { label: "Talk time", align: "right", render: (r) => formatDuration(r.answered_seconds) },
-            { label: "Minutes", align: "right", render: (r) => formatNumber(r.billed_minutes, 1) },
+            { label: "When", render: (r) => <span className="whitespace-nowrap">{formatTime(r.start_time)}</span> },
+            { label: "Customer", render: (r) => (
+              <div>
+                <p className="text-gray-900">{r.customer_name}</p>
+                <p className="text-xs text-gray-500 tabular-nums">{r.phone_number}</p>
+              </div>
+            ) },
+            ...(campaignId ? [] : [{ label: "Campaign", render: (r: Row) => names.get(r.campaign_id) ?? "—" }]),
+            { label: "Result", render: (r) => <ResultTag conclusion={r.conclusion} label={r.conclusion_label} /> },
+            { label: "Talk time", align: "right" as const, render: (r) => (r.answered ? formatDuration(r.answered_seconds) : "—") },
+            { label: "Minutes", align: "right" as const, render: (r) => formatNumber(r.billed_minutes, 1) },
             { label: "Recording", render: (r) => (r.has_recording ? "Yes" : "—") },
           ]}
         />
         {data && data.total > PAGE_SIZE && (
-          <div className="mt-3 flex items-center justify-between text-xs text-gray-400">
+          <div className="mt-3 flex items-center justify-between text-xs text-gray-600">
             <span>{offset + 1}–{Math.min(offset + PAGE_SIZE, data.total)} of {formatNumber(data.total)}</span>
             <div className="flex gap-2">
               <Button variant="secondary" disabled={offset === 0} onClick={() => setOffset(offset - PAGE_SIZE)}>Previous</Button>
@@ -240,37 +327,90 @@ function Calls({ clientId, conclusion, setConclusion }: { clientId?: string; con
   );
 }
 
-function CallDetail({ callId, clientId, onClose }: { callId: string; clientId?: string; onClose: () => void }) {
+/** One call in a side panel: details, summary, recording and the conversation. */
+function CallDetail({ callId, clientId, campaignNames, onClose }: {
+  callId: string;
+  clientId?: string;
+  campaignNames: Map<string, string>;
+  onClose: () => void;
+}) {
   const { data: call } = useData<Row>(scoped(`/client/calls/${callId}`, clientId));
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const facts: [string, ReactNode][] = call ? [
+    ["Campaign", campaignNames.get(call.campaign_id) ?? "—"],
+    ["When", formatTime(call.start_time)],
+    ["Number", call.phone_number],
+    ["Talk time", call.answered ? formatDuration(call.answered_seconds) : "Not answered"],
+    ["Billed", `${formatNumber(call.billed_minutes, 1)} min`],
+  ] : [];
+
   return (
-    <Card title={call ? `${call.customer_name} · ${call.conclusion_label}` : "Call"} action={<Button variant="secondary" onClick={onClose}>Close</Button>}>
-      {!call ? <Empty>Loading…</Empty> : (
-        <div className="space-y-4">
-          <p className="text-xs text-gray-400">{formatTime(call.start_time)} · {call.phone_number} · {formatDuration(call.answered_seconds)} talk time</p>
-          {call.summary?.summary && (
-            <div>
-              <h3 className="text-xs font-semibold text-gray-400 mb-1">Summary</h3>
-              <p className="text-sm text-gray-200">{call.summary.summary}</p>
-              {call.summary.next_step && <p className="mt-1 text-sm text-gray-200">Next step: {call.summary.next_step}</p>}
-            </div>
-          )}
-          {call.recording_url && <audio controls preload="none" src={call.recording_url} className="w-full" />}
-          <div>
-            <h3 className="text-xs font-semibold text-gray-400 mb-1">Transcript</h3>
-            {call.transcript.length ? (
-              <ul className="space-y-1.5 max-h-96 overflow-y-auto">
-                {call.transcript.map((t: Row, i: number) => (
-                  <li key={i} className="text-sm">
-                    <span className={t.speaker === "agent" ? "text-indigo-300" : "text-gray-300"}>{t.speaker === "agent" ? "Agent" : "Customer"}: </span>
-                    <span className="text-gray-200">{t.text}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : <Empty>No conversation on this call.</Empty>}
+    <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label="Call details">
+      <div className="absolute inset-0 bg-black/25" onClick={onClose} aria-hidden="true" />
+      <aside className="relative flex h-full w-full max-w-xl flex-col border-l border-white/70 bg-white/70 shadow-2xl backdrop-blur-2xl">
+        <header className="flex items-start justify-between gap-3 border-b border-white/70 p-5">
+          <div className="min-w-0">
+            <h2 className="truncate text-lg font-semibold text-gray-900">{call?.customer_name ?? "Call"}</h2>
+            {call && <div className="mt-1"><ResultTag conclusion={call.conclusion} label={call.conclusion_label} /></div>}
           </div>
-        </div>
-      )}
-    </Card>
+          <Button variant="secondary" onClick={onClose} autoFocus>Close</Button>
+        </header>
+
+        {!call ? <Empty>Loading…</Empty> : (
+          <div className="flex-1 space-y-5 overflow-y-auto p-5">
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+              {facts.map(([label, value]) => (
+                <div key={label}>
+                  <dt className="text-xs text-gray-500">{label}</dt>
+                  <dd className="text-gray-800">{value}</dd>
+                </div>
+              ))}
+            </dl>
+
+            {call.summary?.summary && (
+              <section className="glass rounded-2xl p-4">
+                <h3 className="mb-1 text-xs font-semibold text-gray-600">Summary</h3>
+                <p className="text-sm text-gray-800">{call.summary.summary}</p>
+                {call.summary.next_step && <p className="mt-2 text-sm text-gray-800"><span className="text-gray-600">Next step: </span>{call.summary.next_step}</p>}
+              </section>
+            )}
+
+            {call.recording_url && (
+              <section>
+                <h3 className="mb-1 text-xs font-semibold text-gray-600">Recording</h3>
+                <audio controls preload="none" src={call.recording_url} className="w-full" />
+              </section>
+            )}
+
+            <section>
+              <h3 className="mb-2 text-xs font-semibold text-gray-600">Conversation</h3>
+              {call.transcript.length ? (
+                <ul className="space-y-2">
+                  {call.transcript.map((t: Row, i: number) => {
+                    const agent = t.speaker === "agent";
+                    return (
+                      <li key={i} className={`flex ${agent ? "justify-start" : "justify-end"}`}>
+                        <div className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm ${
+                          agent ? "rounded-bl-sm bg-violet-100 text-gray-900" : "rounded-br-sm bg-white text-gray-900"}`}>
+                          <p className={`mb-0.5 text-[11px] ${agent ? "text-violet-700" : "text-gray-600"}`}>{agent ? "Agent" : "Customer"}</p>
+                          {t.text}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : <Empty>No conversation on this call.</Empty>}
+            </section>
+          </div>
+        )}
+      </aside>
+    </div>
   );
 }
 
@@ -307,7 +447,7 @@ function leadsFromCsv(text: string, consent: string): Row[] {
   }));
 }
 
-function Campaigns({ clientId }: { clientId?: string }) {
+function Campaigns({ clientId, onViewCalls }: { clientId?: string; onViewCalls: (campaignId: string) => void }) {
   const { data: campaigns, reload } = useData<Row[]>(scoped("/client/campaigns", clientId));
   const { data: products } = useData<Row[]>(scoped("/client/products", clientId));
   const [name, setName] = useState("");
@@ -365,6 +505,7 @@ function Campaigns({ clientId }: { clientId?: string }) {
               <div className="flex justify-end gap-2">
                 <Button variant="secondary" onClick={() => setUploadFor(c.id)}>Add leads</Button>
                 <Button variant="secondary" onClick={() => setLeadsFor(c.id)}>View leads</Button>
+                <Button variant="secondary" onClick={() => onViewCalls(c.id)}>View calls</Button>
                 {c.status === "active" ? (
                   <Button variant="secondary" onClick={() => act(async () => {
                     await post(scoped(`/client/campaigns/${c.id}/pause`, clientId));
@@ -412,7 +553,7 @@ function LeadUpload({ campaignId, clientId, onDone, onClose }: { campaignId: str
   return (
     <Card title="Add leads from a CSV file" action={<Button variant="secondary" onClick={onClose}>Close</Button>}>
       <form onSubmit={submit} className="space-y-3 max-w-xl">
-        <p className="text-xs text-gray-400">Columns: phone_number (with country code, like +919876543210) and full_name. An optional consent_source column overrides the field below.</p>
+        <p className="text-xs text-gray-600">Columns: phone_number (with country code, like +919876543210) and full_name. An optional consent_source column overrides the field below.</p>
         <Field label="CSV file"><Input type="file" accept=".csv" required onChange={(e) => setFile(e.target.files?.[0] ?? null)} /></Field>
         <Field label="Where did these people give consent to be called?" hint="Required by law for every lead. Example: Website form, Nov 2026.">
           <Input value={consent} onChange={(e) => setConsent(e.target.value)} required minLength={3} />
@@ -581,7 +722,7 @@ function Credits({ clientId, overview, onChange }: { clientId?: string; overview
     <>
       <Message error={message.error} success={message.success} />
       <Card title="Request more minutes">
-        <p className="mb-3 text-sm text-gray-400">You have {formatNumber(overview?.minutes.remaining)} minutes remaining.</p>
+        <p className="mb-3 text-sm text-gray-600">You have {formatNumber(overview?.minutes.remaining)} minutes remaining.</p>
         <form onSubmit={submit} className="grid gap-3 sm:grid-cols-3 items-end">
           <Field label="Minutes"><Input type="number" min={1} value={minutes} onChange={(e) => setMinutes(e.target.value)} required /></Field>
           <Field label="Note (optional)"><Input value={note} onChange={(e) => setNote(e.target.value)} maxLength={512} /></Field>

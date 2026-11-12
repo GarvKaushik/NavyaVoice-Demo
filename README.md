@@ -29,6 +29,27 @@ Agreed product rules:
 - A client out of minutes requests more credits and an admin raises the quota. The current call finishes and new dials resume after the top-up.
 - Defaults: 5 concurrent calls per client (admin can change), 30 free browser test minutes per client per month.
 
+### Planned changes (not built yet)
+
+Appointments and confirmations:
+
+- Save every demo booking with its date and time, including generated "sales desk hours" slots (today these are only logged).
+- Appointments page in the client portal: upcoming demos and expert callbacks per campaign, with CSV export.
+- Add the booked demo time and callback time to the CRM webhook payload.
+- Send a real WhatsApp confirmation for demos (needs approved Plivo WhatsApp templates). Until then, the agent says the team will call at the booked time instead of promising WhatsApp details.
+
+Lead results:
+
+- View leads per campaign: result filters with counts, search, paging, open a lead to see its calls, CSV export.
+
+Persuasion on refusal:
+
+- One or two polite persuasion attempts before accepting a "no" (count set in settings), offering a callback for "time nahi hai" and a WhatsApp/callback option for "interest nahi". Clear opt-outs still end the call at once.
+
+Concurrency as automation (needs a decision before changing the rule above):
+
+- Hide concurrent call counts from clients; the dialer shares the platform pool across clients automatically, with the per-client cap optional (admin-only safety limit).
+
 ## How a turn works
 
 ```

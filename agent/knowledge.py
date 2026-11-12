@@ -10,6 +10,7 @@ No other campaign ever does: a client's lead must never hear another product's p
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
@@ -88,6 +89,12 @@ class CampaignKnowledge:
     caller_id: Optional[str] = None
     transfer_numbers: List[str] = field(default_factory=list)
     payment_links_enabled: bool = True
+    other_services: List[str] = field(default_factory=list)  # the client's products outside this campaign, one line each
+
+    @property
+    def company_intro(self) -> str:
+        """What the company does as a whole, written by the client as the INTRODUCTION script entry."""
+        return (self.stage_prompts.get("INTRODUCTION") or "").strip()
 
     def product_names(self) -> List[str]:
         return sorted({f"{c.name} ({c.sku}, {c.plan})" for c in self.catalog.values()})
@@ -149,7 +156,8 @@ SEED_STAGE_PROMPTS: Dict[str, str] = {
         "Customer ki main need ko ek chhote sentence mein wapas confirm karein aur poochein ki kya yeh sahi hai."
     ),
     "PITCH": (
-        "Product ka naam lekar ek simple line mein batayein ki yeh kya hai aur customer ke kaam ka kaise hai (PRODUCT INTRO). "
+        "Customer ne yeh product pehle kabhi nahi suna. Product ka naam lekar batayein ki yeh kis tarah ka product hai, "
+        "kiske liye hai, aur customer ke kaam ka kaise hai (PRODUCT INTRO aur KEY FEATURES). "
         "Agli baar koi nayi baat batayein, wahi line mat dohrayein. Price khud mat batayein. "
         "Offer ya discount ka zikr tabhi karein jab customer pooche ya price ko mehenga bole."
     ),
@@ -190,6 +198,15 @@ def seed_offers(now: Optional[datetime] = None) -> List[OfferEntry]:
     return [OfferEntry("OFFER-DIWALI-20", "CRM-PRO", "Monthly", 20.0, 1199.0,
                        valid_until=now + timedelta(days=30), valid_from=now - timedelta(days=1),
                        max_uses=500, current_uses=12, per_lead_cap=1)]
+
+
+def service_summary(name: str, description: str, max_words: int = 25) -> str:
+    """'Name: first sentence of its description', kept short so it fits in every turn's prompt."""
+    first = re.split(r"(?<=[.!?।])\s+", description.strip(), maxsplit=1)[0] if description.strip() else ""
+    words = first.split()
+    if len(words) > max_words:
+        first = " ".join(words[:max_words]) + " ..."
+    return f"{name}: {first}" if first else name
 
 
 def seed_knowledge(campaign_id: str = SEED_CAMPAIGN_ID) -> CampaignKnowledge:
@@ -239,6 +256,15 @@ async def load_knowledge(campaign_id: str) -> CampaignKnowledge:
             catalog = {(i.sku, i.plan): CatalogEntry(i.sku, i.plan, i.name, i.price_inr, i.billing_period,
                                                       i.description or "", list(i.features or []))
                        for i in items}  # later versions overwrite earlier
+            other_services: List[str] = []
+            if skus:
+                others = (await db.execute(select(CatalogItem).where(
+                    CatalogItem.client_id == client.id, CatalogItem.is_active.is_(True),
+                    CatalogItem.sku.notin_(skus)).order_by(CatalogItem.sku))).scalars().all()
+                first_plan = {}
+                for i in others:
+                    first_plan.setdefault(i.sku, i)
+                other_services = [service_summary(i.name, i.description or "") for i in first_plan.values()]
 
             offers = (await db.execute(select(Offer).where(
                 Offer.client_id == client.id, Offer.is_active.is_(True), Offer.valid_until > now,
@@ -282,6 +308,7 @@ async def load_knowledge(campaign_id: str) -> CampaignKnowledge:
             caller_id=client.caller_id,
             transfer_numbers=list(client.transfer_numbers or []),
             payment_links_enabled=bool(client.payment_links_enabled),
+            other_services=other_services,
         )
     except Exception as e:
         if s.is_production or campaign_id != SEED_CAMPAIGN_ID:

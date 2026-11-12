@@ -34,11 +34,11 @@ export default function AdminApp({ email, onSignOut, onOpenClient }: {
   const waiting = pendingCredits + pendingDocuments;
 
   return (
-    <Shell title="NavyaVoice Admin" subtitle={email} nav={nav} route={page} onNavigate={navigate} onSignOut={onSignOut}
+    <Shell title="Navyakta AI Admin" subtitle={email} nav={nav} route={page} onNavigate={navigate} onSignOut={onSignOut}
       footer={overview && (
         <SidebarBox label="Waiting for approval" value={formatNumber(waiting)}
           action={waiting > 0 && (
-            <Button variant="secondary" className="w-full" onClick={() => navigate(pendingCredits ? "credits" : "knowledge")}>Review</Button>
+            <Button className="w-full" onClick={() => navigate(pendingCredits ? "credits" : "knowledge")}>Review</Button>
           )} />
       )}>
       {section === "overview" && <Overview overview={overview} onSelect={(id) => navigate(`client-admin/${id}`)} />}
@@ -183,8 +183,8 @@ function ClientDetail({ clientId, onChange, onOpenClient }: { clientId: string; 
     <>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold text-white">{client.name}</h2>
-          <p className="text-sm text-gray-400">{formatNumber(client.remaining_minutes)} minutes remaining</p>
+          <h2 className="text-lg font-semibold text-gray-900">{client.name}</h2>
+          <p className="text-sm text-gray-600">{formatNumber(client.remaining_minutes)} minutes remaining</p>
         </div>
         <Button variant="secondary" onClick={() => onOpenClient({ id: client.id, name: client.name })}>Open client's portal</Button>
       </div>
@@ -211,7 +211,7 @@ function ClientDetail({ clientId, onChange, onOpenClient }: { clientId: string; 
           <Field label="Sales desk numbers" hint="For warm transfers, comma-separated"><Input value={form.transfer_numbers} onChange={set("transfer_numbers")} /></Field>
           <Field label="CRM webhook URL"><Input value={form.crm_webhook_url} onChange={set("crm_webhook_url")} /></Field>
           <Field label="CRM webhook secret" hint={client.crm_webhook_secret_set ? "Set. Leave empty to keep it." : "Not set"}><Input type="password" value={form.crm_webhook_secret} onChange={set("crm_webhook_secret")} autoComplete="new-password" /></Field>
-          <label className="flex items-center gap-2 text-sm text-gray-200 sm:col-span-2 lg:col-span-3">
+          <label className="flex items-center gap-2 text-sm text-gray-800 sm:col-span-2 lg:col-span-3">
             <input type="checkbox" checked={form.payment_links_enabled} onChange={(e) => setForm({ ...form, payment_links_enabled: e.target.checked })} />
             Allow payment links. All links currently settle to the one Razorpay account in settings.
           </label>
@@ -284,7 +284,7 @@ function ContentEditor({ clientId, content, run }: { clientId: string; content: 
 
   return (
     <Card title="Products and script" action={<Button onClick={save}>Save content</Button>}>
-      <p className="mb-3 text-xs text-gray-400">Saving approves this content for live calls. Prices come only from Products. Keep objection answers to about 18 words. Objection types: price, timing, trust, competitor, need. Policy topics: refunds, cancellation, data_residency.</p>
+      <p className="mb-3 text-xs text-gray-600">Saving approves this content for live calls. Prices come only from Products. Keep objection answers to about 18 words. Objection types: price, timing, trust, competitor, need. Policy topics: refunds, cancellation, data_residency.</p>
       <Message error={error} />
       <div className="grid gap-3 lg:grid-cols-2">
         <Field label="Products"><Textarea value={products} onChange={setProducts} rows={14} /></Field>
@@ -371,7 +371,7 @@ function CreditRequests({ onChange }: { onChange: () => Promise<void> }) {
     <>
       <Message error={feedback.error} success={feedback.success} />
       <Card title="Waiting for a decision">
-        <p className="mb-3 text-xs text-gray-400">Take payment outside the system first. Approving adds the minutes straight away and any waiting calls resume.</p>
+        <p className="mb-3 text-xs text-gray-600">Take payment outside the system first. Approving adds the minutes straight away and any waiting calls resume.</p>
         <Table<Row> rows={data ?? []} rowKey={(r) => r.id} empty="Nothing waiting." columns={[
           { label: "Client", render: (r) => r.client_name },
           { label: "Minutes", align: "right", render: (r) => formatNumber(r.minutes) },
@@ -411,7 +411,7 @@ function KnowledgeReview({ onChange }: { onChange: () => Promise<void> }) {
     <>
       <Message error={feedback.error} success={feedback.success} />
       <Card title="Documents waiting for approval">
-        <p className="mb-3 text-xs text-gray-400">Read a document before approving. The agent may speak anything in it, including prices and promises.</p>
+        <p className="mb-3 text-xs text-gray-600">Read a document before approving. The agent may speak anything in it, including prices and promises.</p>
         <Table<Row> rows={data ?? []} rowKey={(d) => d.id} empty="Nothing waiting." columns={[
           { label: "Client", render: (d) => d.client_name },
           { label: "File", render: (d) => d.filename },
@@ -433,9 +433,9 @@ function KnowledgeReview({ onChange }: { onChange: () => Promise<void> }) {
         }>
           <ol className="space-y-2 max-h-[32rem] overflow-y-auto">
             {preview.chunks.map((c, i) => (
-              <li key={i} className="rounded-lg border border-gray-800 p-2 text-sm">
-                {c.question !== c.answer.slice(0, 120) && <p className="text-gray-400 mb-1">{c.question}</p>}
-                <p className="text-gray-200 whitespace-pre-wrap">{c.answer}</p>
+              <li key={i} className="rounded-lg border border-white/70 p-2 text-sm">
+                {c.question !== c.answer.slice(0, 120) && <p className="text-gray-600 mb-1">{c.question}</p>}
+                <p className="text-gray-800 whitespace-pre-wrap">{c.answer}</p>
               </li>
             ))}
           </ol>
@@ -455,7 +455,7 @@ function Audit() {
         { label: "Who", render: (a) => a.actor },
         { label: "Action", render: (a) => a.action.replaceAll("_", " ") },
         { label: "Client", render: (a) => a.client_id ?? "—" },
-        { label: "Details", render: (a) => (a.details ? <code className="text-xs text-gray-400">{JSON.stringify(a.details)}</code> : "—") },
+        { label: "Details", render: (a) => (a.details ? <code className="text-xs text-gray-600">{JSON.stringify(a.details)}</code> : "—") },
       ]} />
     </Card>
   );

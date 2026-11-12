@@ -10,9 +10,9 @@ interface Props {
 }
 
 const STATE_COLORS: Record<VADState, string> = {
-  idle: "bg-gray-600",
+  idle: "bg-gray-400",
   listening: "bg-green-500",
-  speaking: "bg-emerald-400",
+  speaking: "bg-emerald-600",
   processing: "bg-yellow-500",
   agent_speaking: "bg-blue-500",
 };
@@ -82,12 +82,12 @@ export default function AudioVisualizer({ audioLevel, vadState }: Props) {
         {/* Center mic icon */}
         <div className={`absolute w-14 h-14 rounded-full flex items-center justify-center ${STATE_COLORS[vadState]} transition-colors duration-300`}>
           {vadState === "processing" ? (
-            <svg className="w-6 h-6 text-white animate-spin" fill="none" viewBox="0 0 24 24">
+            <svg className="w-6 h-6 text-gray-900 animate-spin" fill="none" viewBox="0 0 24 24">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
             </svg>
           ) : (
-            <svg className="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 24 24">
+            <svg className="w-6 h-6 text-gray-900" fill="currentColor" viewBox="0 0 24 24">
               <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
               <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
             </svg>
@@ -96,12 +96,12 @@ export default function AudioVisualizer({ audioLevel, vadState }: Props) {
 
         {/* Pulse ring when listening */}
         {vadState === "listening" && (
-          <div className="absolute w-14 h-14 rounded-full border-2 border-green-400 animate-ping opacity-40" />
+          <div className="absolute w-14 h-14 rounded-full border-2 border-green-600 animate-ping opacity-40" />
         )}
       </div>
 
       {/* State label */}
-      <span className="text-sm font-medium text-gray-400">{STATE_LABELS[vadState]}</span>
+      <span className="text-sm font-medium text-gray-600">{STATE_LABELS[vadState]}</span>
     </div>
   );
 }
