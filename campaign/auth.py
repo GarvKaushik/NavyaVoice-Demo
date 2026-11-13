@@ -54,11 +54,21 @@ async def _user_from_cookie(token: Optional[str], db: AsyncSession) -> Optional[
     if not token:
         return None
     try:
-        user_id = jwt.decode(token, _secret(), algorithms=["HS256"])["sub"]
+        claims = jwt.decode(token, _secret(), algorithms=["HS256"])
     except jwt.PyJWTError:
         return None
-    user = await db.get(User, user_id)
-    return user if user is not None and user.is_active else None
+    user = await db.get(User, claims["sub"])
+    if user is None or not user.is_active:
+        return None
+    cutoff = user.sessions_valid_after
+    if cutoff and claims.get("iat", 0) < int(cutoff.replace(tzinfo=timezone.utc).timestamp()):
+        return None  # signed out everywhere, or the password changed after this session began
+    return user
+
+
+def end_all_sessions(user: User) -> None:
+    """Every session issued before now stops working (a new one issued in the same second stays valid)."""
+    user.sessions_valid_after = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
 
 
 async def current_user(voice_agent_session: Optional[str] = Cookie(default=None),

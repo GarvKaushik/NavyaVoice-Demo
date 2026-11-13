@@ -60,7 +60,7 @@ class PreRenderedPhraseCache:
             "Aapko aage se hamari taraf se call nahi aayega. Aapka din shubh ho."
         ),
         HOLD_CHECKING_DETAILS: "Ji ek second rukiye, main system mein details check karke batati hoon.",
-        LLM_FILLER: "Ji, ek second.",
+        LLM_FILLER: "Haan ji, ek minute.",
         SILENCE_REPROMPT: "Aap sun pa rahe hain sir?",
         SILENCE_CLOSE: (
             "Lagta hai aapki aawaz nahi aa rahi hai sir. Main aapko thodi der mein dobara call karti hoon. Dhanyawaad."
@@ -84,9 +84,35 @@ class PreRenderedPhraseCache:
         ACK_SHORT: "Ji bilkul.",
     }
 
+    # English campaigns; every phrase above needs one (tests check this).
+    # shortcut: these are not pre-rendered, so the first English call synthesizes them live and the sentence cache
+    # keeps them; render them in speech.prerender if that first-call delay matters.
+    ENGLISH_TEXTS: Dict[str, str] = {
+        DISCLOSURE: "Hello! This is {persona}, an AI assistant calling from {company}. "
+                    "This call is recorded for quality and training.",
+        OPT_OUT_CONFIRMED: "Of course. I have removed your number from our calling list, and you will not get calls "
+                           "from us again. Have a good day.",
+        HOLD_CHECKING_DETAILS: "One moment please, let me check the details for you.",
+        LLM_FILLER: "Sure, one moment.",
+        SILENCE_REPROMPT: "Can you hear me?",
+        SILENCE_CLOSE: "I think I can't hear you. I will call you back in a little while. Thank you.",
+        NETWORK_ISSUE_FALLBACK: "There seems to be a network issue, I will call you back in a little while.",
+        TRANSFER_TO_AGENT: "Sure, I am transferring your call to our senior product expert, please stay on the line.",
+        TRANSFER_UNAVAILABLE: "All our experts are busy right now. I will arrange a callback from them. Thank you.",
+        SAFE_GUARD_REPLACEMENT: "Let me confirm the exact details and get back to you.",
+        WRONG_PERSON: "Sorry, it looks like I have the wrong number. Have a good day.",
+        ASK_CALLBACK_TIME: "No problem at all. When would be a good time to call you?",
+        ABUSE_CLOSE: "I understand you are upset. I will end the call here. Thank you.",
+        COMPLAINT_LOGGED: "I have registered your complaint. You can also reach us at {complaint_contact}. Thank you.",
+        PERMISSION_DENIED_CLOSE: "No problem, thank you for your time. Have a good day.",
+        GOODBYE: "Thank you so much. Have a good day.",
+        ACK_SHORT: "Sure.",
+    }
+
     def __init__(self, cache_dir: Optional[str] = None, voice: Optional[str] = None, company: Optional[str] = None,
-                 persona: Optional[str] = None, complaint_contact: Optional[str] = None):
+                 persona: Optional[str] = None, complaint_contact: Optional[str] = None, language: str = "hinglish"):
         s = get_settings()
+        self.texts = self.ENGLISH_TEXTS if language == "english" else self.CANONICAL_TEXTS
         self.cache_dir = cache_dir or s.PHRASE_CACHE_DIR
         self.voice = voice or s.tts_voice
         self.model = s.tts_model
@@ -104,7 +130,7 @@ class PreRenderedPhraseCache:
     # ------------------------------------------------------------------
     def get_text(self, phrase_id: str) -> Optional[str]:
         """Returns the spoken transcript for a cached phrase."""
-        template = self.CANONICAL_TEXTS.get(phrase_id)
+        template = self.texts.get(phrase_id)
         return template.format(**self._fmt) if template else None
 
     def key_for(self, phrase_id: str) -> str:

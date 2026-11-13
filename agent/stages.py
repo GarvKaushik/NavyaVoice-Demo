@@ -27,6 +27,9 @@ def _has(text: str, words) -> bool:
     return any(re.search(rf"(?<!\w){re.escape(w)}(?!\w)", text) for w in words)
 
 
+has_any = _has
+
+
 AFFIRMATIVE = ["haan", "han", "haanji", "ha", "ji", "ji haan", "yes", "yeah", "sahi", "bilkul", "theek hai", "thik hai",
                "correct", "right", "ok", "okay", "achha", "accha", "zaroor", "sure", "haan ji", "boliye", "bolo",
                "bataiye", "batao", "chalega"]
@@ -35,6 +38,13 @@ PERMISSION_GRANT = ["boliye", "bolo", "bataiye", "batao", "kya baat hai", "haan 
                     "sun rahi", "go ahead", "tell me", "haan bataiye", "kahiye"]
 PERMISSION_DENY = ["time nahi hai", "interest nahi", "interested nahi", "nahi chahiye", "mat karo", "not interested",
                    "zaroorat nahi"]
+# A firm no ends the call politely; a half-meant no gets up to PERSUASION_MAX_ATTEMPTS polite tries
+FIRM_NO_STRONG = ["bilkul nahi", "kabhi nahi", "koi interest nahi", "bilkul interest nahi", "no thanks", "no thank you"]
+FIRM_NO = ["not interested", "interest nahi", "interested nahi", "nahi chahiye", "mat karo", "zaroorat hi nahi"]
+SOFT_NO = ["abhi nahi", "abhi to nahi", "filhaal nahi", "abhi zaroorat nahi", "pata nahi", "shayad", "sochna padega",
+           "soch ke", "sochenge", "dekhte hain", "time nahi", "budget nahi", "mehenga", "mehnga", "nahi lagta",
+           "sure nahi", "not sure", "not now", "itna zaroori nahi"]
+TIME_NO = ["time nahi", "abhi nahi", "abhi to nahi", "not now"]
 PRICE_ASK = ["price", "kitne ka", "kitne", "kitna", "kitni", "cost", "charges", "charge", "fees", "fee", "rate", "paisa",
              "kimat", "keemat", "pricing", "plan kya"]
 PITCH_ASK = ["kya hai ye", "kya hai yeh", "product kya", "kya karta", "features", "kaise kaam", "kya milega",
@@ -85,6 +95,18 @@ class TurnSignals:
     objection: Optional[str] = None
     needs: List[str] = field(default_factory=list)
     small_talk: bool = False
+    refusal: Optional[str] = None  # "firm" or "soft" (half-meant) no
+
+
+def refusal_kind(text: str) -> Optional[str]:
+    """Whether a turn is a firm no, a half-meant no ("abhi nahi", "sochna padega", "mehenga hai"), or neither.
+    A bare "nahi" is neither: it may only answer the question just asked."""
+    t = text.lower().strip()
+    if _has(t, FIRM_NO_STRONG):
+        return "firm"
+    if _has(t, SOFT_NO):
+        return "soft"
+    return "firm" if _has(t, FIRM_NO) else None
 
 
 def extract_signals(text: str) -> TurnSignals:
@@ -107,6 +129,7 @@ def extract_signals(text: str) -> TurnSignals:
     sig.identity_yes = _has(t, ["speaking", "bol raha", "bol rahi", "main hi", "main hoon", "haan main"]) and not sig.negative
     sig.wants_price = bool(PRICE_QUESTION.search(t)) and not sig.objection and not _has(t, ["nahi", "nahin", "mat"])
     sig.small_talk = _has(t, SMALL_TALK) and not (sig.asks_price or sig.buying_signal or sig.needs or sig.objection)
+    sig.refusal = refusal_kind(t)
     return sig
 
 
@@ -150,6 +173,7 @@ class CallStep(str, Enum):
 class StepPlan:
     stage: SalesStage
     line: Optional[str] = None  # spoken as written, with no model call
+    line_en: Optional[str] = None  # the same line for English campaigns
     goal: str = ""  # what the model must do on this step
 
 
@@ -158,7 +182,8 @@ CALL_FLOW: Dict[CallStep, StepPlan] = {
     CallStep.CONFIRM_PERSON: StepPlan(SalesStage.OPENING, goal=(
         "The customer has not confirmed who they are. Answer anything they asked, then ask if you are speaking to "
         "{name} ji. If it is the wrong person, apologise and call end_call with wrong_person.")),
-    CallStep.HOW_ARE_YOU: StepPlan(SalesStage.OPENING, line="Hello {name} ji, aap kaise hain?"),
+    CallStep.HOW_ARE_YOU: StepPlan(SalesStage.OPENING, line="Hello {name} ji, aap kaise hain?",
+                                   line_en="Hello {name}, how are you?"),
     CallStep.OFFER: StepPlan(SalesStage.OPENING, goal=(
         "The customer is {name} and has just answered how they are. Do not ask who they are. Say, in under 30 words: "
         "(1) a warm reaction in 2-3 words, and if they asked how you are, say you are fine; (2) one line starting "
@@ -167,7 +192,7 @@ CALL_FLOW: Dict[CallStep, StepPlan] = {
         "No price, features, or questions about how they work now.")),
     CallStep.OFFER_AGAIN: StepPlan(SalesStage.OPENING, goal=(
         "They said no to your offer. Say 'koi baat nahi', give one short benefit from PRODUCT INTRO, and ask once more "
-        "if it is worth a look. Under 20 words.")),
+        "if it is worth a look; if they said they have no time, offer to call later instead. Under 20 words.")),
     CallStep.EXPLAIN: StepPlan(SalesStage.PITCH, goal=(
         "The customer has never heard of the product. In up to 3 sentences and about 45 words: (1) a short first "
         "sentence naming the product and what kind of product it is, like '<product name> ek software hai jo ...'; "
@@ -183,12 +208,37 @@ CALL_FLOW: Dict[CallStep, StepPlan] = {
 # Replaces the OFFER goal when the client has written a company introduction (the INTRODUCTION script entry):
 # the company comes first, and the main product is named on the next step.
 OFFER_WITH_COMPANY_INTRO = (
-    "The customer is {name} and has just answered how they are. Do not ask who they are. Say, in up to 3 short "
-    "sentences and about 45 words: (1) a warm reaction in 2-3 words, and if they asked how you are, say you are fine; "
-    "(2) 'Main {company} se bol rahi hoon' and what the company does, in one or two lines from COMPANY INTRO, "
-    "without reading out every service; (3) ask for two minutes of their time with exactly this phrasing: "
-    "'Kya main aapke do minute le sakti hoon, ek service ke baare mein batane ke liye jo aapke business mein help kar "
-    "sakti hai?' (never 'do minute de sakti hoon'). Do not name the product yet. No price or features.")
+    "The customer is {name} and has just answered how they are. Do not ask who they are. Introduce the company "
+    "properly, like a person would, in 4-5 natural sentences and about 70 words. Do not cut it short: "
+    "(1) a warm reaction in 2-3 words, and if they asked how you are, say you are fine; (2) 'Main {company} se bol "
+    "rahi hoon', then what the company does in its industry and the kinds of services it provides, from COMPANY "
+    "INTRO; (3) the company's main goal for its customers, from COMPANY INTRO; (4) ask for two minutes to tell them "
+    "about a service, like 'Kya main aapke do minute le sakti hoon, ek service ke baare mein batane ke liye jo aapke "
+    "business ke kaam aa sakti hai?' (never 'do minute de sakti hoon'). Use only what COMPANY INTRO says: no invented clients, numbers or claims. Do not name the product yet. "
+    "No price or features.")
+
+
+# The first product turn after a company introduction: lead from the company to the product
+PRODUCT_BRIDGE = (
+    "You introduced the company and they gave you two minutes. Your FIRST sentence must lead from the company to the "
+    "product, in your own words, like 'Main aapko {product} ke baare mein batane ke liye call kar rahi thi, jo ek ... "
+    "hai'. Then: ")
+
+
+# English campaigns: the goals' quoted Hinglish example lines, in English (models copy quoted text word for word)
+ENGLISH_QUOTES = {
+    "{name} ji": "{name}",
+    "'Main {company} se bol rahi hoon'": "'I am calling from {company}'",
+    "'Kya aap aisa software lena chahenge jo ...?'": "'Would you be interested in software that ...?'",
+    "'koi baat nahi'": "'no problem'",
+    "'<product name> ek software hai jo ...'": "'<product name> is software that ...'",
+    "'aapke kaam ka lagta hai?'": "'does this sound useful for you?'",
+    "'Kya main aapke do minute le sakti hoon, ek service ke baare mein batane ke liye jo aapke business ke kaam aa "
+    "sakti hai?' (never 'do minute de sakti hoon')": "'Could I take two minutes to tell you about a service that could "
+                                                     "help your business?'",
+    "'Main aapko {product} ke baare mein batane ke liye call kar rahi thi, jo ek ... hai'":
+        "'I was calling to tell you about {product}, which is ...'",
+}
 
 
 class StageManager:
@@ -203,8 +253,11 @@ class StageManager:
         SalesStage.CLOSE_NEXT_STEP,
     ]
 
-    def __init__(self, initial_stage: SalesStage = SalesStage.OPENING):
+    def __init__(self, initial_stage: SalesStage = SalesStage.OPENING, max_persuasion: int = 2):
         self.current_stage: SalesStage = initial_stage
+        self.max_persuasion = max_persuasion
+        self.persuasion_attempts: int = 0
+        self.persuading: bool = False  # this turn answers a half-meant no
         self.stage_before_objection: SalesStage = SalesStage.PITCH
         self.small_talk_count: int = 0
         self.confirmed_needs: List[str] = []
@@ -275,42 +328,62 @@ class StageManager:
         if self.step == CallStep.HOW_ARE_YOU:
             return CallStep.OFFER
         if self.step == CallStep.OFFER:
-            return CallStep.OFFER_AGAIN if sig.negative else CallStep.EXPLAIN
+            if not sig.negative:
+                return CallStep.EXPLAIN
+            if sig.refusal == "firm" or self.persuasion_attempts >= self.max_persuasion:
+                return CallStep.DECLINED
+            self.persuasion_attempts += 1
+            return CallStep.OFFER_AGAIN
         if self.step == CallStep.OFFER_AGAIN:
-            return CallStep.DECLINED if sig.negative else CallStep.EXPLAIN
+            if not sig.negative:
+                return CallStep.EXPLAIN
+            if sig.refusal == "soft" and self.persuasion_attempts < self.max_persuasion:
+                self.persuasion_attempts += 1
+                return CallStep.OFFER_AGAIN  # a half-meant no gets one more polite try
+            return CallStep.DECLINED
         if self.step == CallStep.EXPLAIN and not sig.negative:
             wants_more = sig.question or sig.asks_pitch
             if self.explanations >= MAX_EXPLANATIONS or (self.explanations and not wants_more):
                 return CallStep.PRICE
         return self.step
 
-    def goal_for_step(self, name: str, company: str, company_intro: bool = False) -> str:
+    def goal_for_step(self, name: str, company: str, company_intro: bool = False, product: str = "",
+                      english: bool = False) -> str:
         """The model's instruction for the current step, while the call is on its fixed path."""
         plan = CALL_FLOW[self.step]
         if plan.stage != self.current_stage:
             return ""
         goal = OFFER_WITH_COMPANY_INTRO if company_intro and self.step == CallStep.OFFER else plan.goal
-        return goal.format(name=name, company=company)
+        if company_intro and product and self.step == CallStep.EXPLAIN and not self.explanations:
+            goal = PRODUCT_BRIDGE + goal
+        if english:
+            for hinglish, en in ENGLISH_QUOTES.items():
+                goal = goal.replace(hinglish, en)
+        return goal.format(name=name, company=company, product=product)
+
+    def is_company_intro_turn(self, company_intro: bool) -> bool:
+        return company_intro and self.current_stage == SalesStage.OPENING and self.step == CallStep.OFFER
 
     def is_long_turn(self, company_intro: bool = False) -> bool:
         """Turns that explain something new get more words: the pitch, and the company introduction."""
-        return self.current_stage == SalesStage.PITCH or (
-            company_intro and self.current_stage == SalesStage.OPENING and self.step == CallStep.OFFER)
+        return self.current_stage == SalesStage.PITCH or self.is_company_intro_turn(company_intro)
 
-    def line_for_step(self, name: str) -> Optional[str]:
+    def line_for_step(self, name: str, english: bool = False) -> Optional[str]:
         plan = CALL_FLOW[self.step]
-        return plan.line.format(name=name) if plan.line and plan.stage == self.current_stage else None
+        line = plan.line_en if english and plan.line_en else plan.line
+        return line.format(name=name) if line and plan.stage == self.current_stage else None
 
     def apply(self, sig: TurnSignals) -> Optional[str]:
         """Applies the plan's transition rules. Returns a reason when the stage changed."""
         before = self.current_stage
+        self.persuading = False
         self.record_turn(sig.small_talk)
         new_needs = [n for n in sig.needs if n not in self.confirmed_needs]
         self.confirmed_needs.extend(new_needs)
         stage = self.current_stage
 
         if stage == SalesStage.OPENING:
-            if sig.permission_denied:
+            if sig.permission_denied and sig.refusal != "soft":
                 return None  # engine closes politely / offers callback
             if sig.wants_price:
                 self.step = CallStep.PRICE
@@ -322,6 +395,14 @@ class StageManager:
                 self.step = self._next_step(sig)
             self.transition_to(CALL_FLOW[self.step].stage, f"Call step: {self.step.value}")
             return self._changed(before, f"Call step: {self.step.value}")
+
+        if sig.refusal and stage != SalesStage.COMPLETED and not (sig.question or sig.asks_price or sig.asks_pitch
+                                                                 or sig.buying_signal):
+            if sig.refusal == "firm" or self.persuasion_attempts >= self.max_persuasion:
+                self.step = CallStep.DECLINED  # engine closes politely
+                return None
+            self.persuasion_attempts += 1
+            self.persuading = True
 
         if sig.objection and stage != SalesStage.OPENING:
             count = self.handled_objections.get(sig.objection, 0) + 1
@@ -379,7 +460,7 @@ class StageManager:
             SalesStage.NEED_IDENTIFICATION: "Goal: State the customer's main need in one short sentence and ask if correct.",
             SalesStage.PITCH: "Goal: Explain briefly what the product does for them.",
             SalesStage.OBJECTION_HANDLING: "Goal: Answer with the approved playbook for this objection. Never argue.",
-            SalesStage.CLOSE_NEXT_STEP: "Goal: Move to one clear next step. Offer a live demo first; offer the payment link if they want to buy. "
+            SalesStage.CLOSE_NEXT_STEP: "Goal: Move to one clear next step. Offer a live demo first; if they want to buy or negotiate, offer a meeting with the team. "
                                          "Never ask what else they want to know.",
             SalesStage.COMPLETED: "Goal: The action is confirmed. Thank them and close in one sentence.",
         }

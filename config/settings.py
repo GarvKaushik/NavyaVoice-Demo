@@ -442,7 +442,14 @@ class Settings(BaseSettings):
     LIVEKIT_PUBLIC_URL: str = Field(default="", description="LiveKit URL browsers connect to (defaults to LIVEKIT_URL)")
     DIALER_MAX_CONCURRENT_CALLS: int = Field(default=100, description="Calls the platform runs at once, across all clients")
     DIALER_POLL_SECONDS: float = Field(default=1.0, description="How often the dialer looks for due jobs")
-    DEFAULT_CLIENT_MAX_CONCURRENT_CALLS: int = Field(default=5, description="Concurrent call cap for a new client")
+    DEFAULT_CLIENT_MAX_CONCURRENT_CALLS: int = Field(default=3, description="Concurrent call cap for a new client")
+    PERSUASION_MAX_ATTEMPTS: int = Field(
+        default=2, description="Polite persuasion attempts per call, only after a half-meant no; a firm no ends the call"
+    )
+    TRIAL_TEST_MINUTES: int = Field(default=50, description="Minutes added to a new free trial's balance (browser tests only)")
+    SIGNUPS_PER_DAY: int = Field(default=3, description="Free trial sign-ups one address can make per day")
+    ENQUIRIES_PER_HOUR: int = Field(default=5, description="Landing page enquiries one visitor can send per hour")
+    LOGIN_MAX_FAILURES_PER_IP: int = Field(default=20, description="Failed logins from one address before a 15-minute block")
     TEST_CALL_MONTHLY_MINUTES: int = Field(default=30, description="Free browser test minutes per client per month")
     KNOWLEDGE_MAX_UPLOAD_MB: int = Field(default=5, description="Largest knowledge document accepted")
     DEMO_CALL_ENABLED: bool = Field(default=True, description="The landing page's 'Talk to the agent' browser call")

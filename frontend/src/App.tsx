@@ -1,5 +1,5 @@
 /* ─────────────────────────────────────────────────────────────
- * App — Main layout for the Navyakta AI script console.
+ * App — Main layout for the Navix AI script console.
  * Three-column layout: Conversation | Voice Control | Sidebar
  * ─────────────────────────────────────────────────────────── */
 import { useState } from "react";
@@ -25,7 +25,7 @@ export default function App() {
         <div className="flex items-center gap-3">
           <span className="text-xl">🎙️</span>
           <div>
-            <h1 className="text-base font-bold text-gray-900 tracking-tight">Navyakta AI</h1>
+            <h1 className="text-base font-bold text-gray-900 tracking-tight">Navix AI</h1>
             <p className="text-[11px] text-gray-500">Hinglish Sales Calling Console</p>
           </div>
         </div>

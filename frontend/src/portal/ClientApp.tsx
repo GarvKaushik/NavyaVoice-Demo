@@ -5,20 +5,24 @@
  * ─────────────────────────────────────────────────────────── */
 import { useEffect, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import { del, formatDuration, formatNumber, formatTime, post, scoped, upload } from "./api";
+import { del, formatDuration, formatNumber, formatTime, post, put, scoped, upload } from "./api";
 import type { Row } from "./api";
-import { Button, Card, Empty, Field, Input, Message, Select, Shell, SidebarBox, Stat, StatusTag, Table, useData, useHashRoute } from "./ui";
+import { Button, Card, Empty, Field, Input, Message, Select, Shell, SidebarBox, Stat, StatusTag, Table, Textarea, useData, useHashRoute } from "./ui";
 import type { NavItem } from "./ui";
 import TestCall from "./TestCall";
+import Account from "./Account";
 
 const NAV: NavItem[] = [
   { key: "overview", label: "Overview", icon: "home" },
   { key: "campaigns", label: "Campaigns & leads", icon: "megaphone", group: "Calling" },
   { key: "test", label: "Test & call", icon: "phone", group: "Calling" },
   { key: "calls", label: "Call results", icon: "list", group: "Calling" },
+  { key: "appointments", label: "Appointments", icon: "calendar", group: "Calling" },
   { key: "knowledge", label: "Knowledge", icon: "book", group: "Content" },
   { key: "opt-outs", label: "Opt-outs", icon: "ban", group: "Account" },
+  { key: "plans", label: "Plans", icon: "layers", group: "Account" },
   { key: "credits", label: "Credits", icon: "wallet", group: "Account" },
+  { key: "account", label: "Account", icon: "shield", group: "Account" },
 ];
 
 export default function ClientApp({ clientId, title, subtitle, onSignOut, onExit }: {
@@ -32,6 +36,9 @@ export default function ClientApp({ clientId, title, subtitle, onSignOut, onExit
   const [hashRoute, navigate] = useHashRoute(`${prefix}overview`);
   const route = hashRoute.startsWith(prefix) ? hashRoute.slice(prefix.length) : "overview";
   const { data: overview, reload } = useData<Row>(scoped("/client/overview", clientId));
+  const nav = overview?.client.is_trial
+    ? [NAV[0], { key: "setup", label: "Set up your agent", icon: "panel" as const, group: "Calling" }, ...NAV.slice(1)]
+    : NAV;
   const [conclusion, setConclusion] = useState("");
   const [campaign, setCampaign] = useState("");
 
@@ -39,21 +46,26 @@ export default function ClientApp({ clientId, title, subtitle, onSignOut, onExit
     <Shell
       title={title}
       subtitle={subtitle}
-      nav={NAV}
+      nav={nav}
       route={route}
       onNavigate={(key) => navigate(`${prefix}${key}`)}
       onSignOut={onSignOut}
       badge={onExit && <Button variant="secondary" onClick={onExit}>Back to admin</Button>}
-      footer={overview && (
+      footer={overview && (overview.client.is_trial ? (
+        <SidebarBox label="You're on a free trial"
+          value={`${formatNumber(Math.max(0, overview.minutes.remaining), 1)} min left`}
+          action={<Button className="w-full" onClick={() => navigate(`${prefix}plans`)}>See plans</Button>} />
+      ) : (
         <SidebarBox label="Minutes left" value={formatNumber(overview.minutes.remaining)}
           action={<Button className="w-full" onClick={() => navigate(`${prefix}credits`)}>Request more minutes</Button>} />
-      )}
+      ))}
     >
-      {overview?.minutes.out_of_minutes && (
+      {overview?.minutes.out_of_minutes && !overview.client.is_trial && (
         <Message error="You are out of minutes, so new calls are paused. Request more credits and calling resumes once they are approved." />
       )}
       {route === "overview" && (
-        <Overview overview={overview} clientId={clientId} onChoose={(key) => { setCampaign(""); setConclusion(key); navigate(`${prefix}calls`); }} />
+        <Overview overview={overview} clientId={clientId} onChoose={(key) => { setCampaign(""); setConclusion(key); navigate(`${prefix}calls`); }}
+          onSeeAppointments={() => navigate(`${prefix}appointments`)} />
       )}
       {route === "calls" && (
         <Calls clientId={clientId} campaignId={campaign} setCampaignId={setCampaign} conclusion={conclusion} setConclusion={setConclusion} />
@@ -61,18 +73,28 @@ export default function ClientApp({ clientId, title, subtitle, onSignOut, onExit
       {route === "campaigns" && (
         <Campaigns clientId={clientId} onViewCalls={(id) => { setCampaign(id); setConclusion(""); navigate(`${prefix}calls`); }} />
       )}
+      {route === "appointments" && <Appointments clientId={clientId} />}
       {route === "knowledge" && <Knowledge clientId={clientId} />}
       {route === "test" && overview && (
-        <TestCall clientId={clientId} used={overview.test_call.used_minutes} limit={overview.test_call.monthly_limit} />
+        <TestCall clientId={clientId} used={overview.test_call.used_minutes} limit={overview.test_call.monthly_limit}
+          trial={overview.client.is_trial} trialLeft={overview.minutes.remaining} onSeePlans={() => navigate(`${prefix}plans`)} />
       )}
       {route === "opt-outs" && <OptOuts clientId={clientId} />}
       {route === "credits" && <Credits clientId={clientId} overview={overview} onChange={reload} />}
+      {route === "plans" && <Plans clientId={clientId} overview={overview} />}
+      {route === "setup" && <AgentSetup clientId={clientId} onSaved={() => navigate(`${prefix}test`)} />}
+      {route === "account" && <Account />}
     </Shell>
   );
 }
 
 // ── Overview ─────────────────────────────────────────────────
-function Overview({ overview, clientId, onChoose }: { overview: Row | null; clientId?: string; onChoose: (key: string) => void }) {
+function Overview({ overview, clientId, onChoose, onSeeAppointments }: {
+  overview: Row | null;
+  clientId?: string;
+  onChoose: (key: string) => void;
+  onSeeAppointments: () => void;
+}) {
   if (!overview) return <Empty>Loading…</Empty>;
   const { minutes, plan } = overview;
   const share = minutes.total_granted > 0 ? Math.max(0, Math.min(1, minutes.remaining / minutes.total_granted)) : 0;
@@ -89,6 +111,8 @@ function Overview({ overview, clientId, onChoose }: { overview: Row | null; clie
         <Stat label="Calls this month" value={formatNumber(totalCalls)} />
         <Stat label="Calls in progress" value={overview.active_calls} note={`Up to ${overview.client.max_concurrent_calls} at once`} />
       </div>
+
+      <Upcoming clientId={clientId} onSeeAll={onSeeAppointments} />
 
       <Card title="Minutes">
         <div className="flex justify-between text-xs text-gray-600 mb-1.5">
@@ -128,6 +152,31 @@ function Overview({ overview, clientId, onChoose }: { overview: Row | null; clie
         <UsageChart clientId={clientId} />
       </div>
     </>
+  );
+}
+
+/** The next few demos, meetings and callbacks, on the overview. */
+function Upcoming({ clientId, onSeeAll }: { clientId?: string; onSeeAll: () => void }) {
+  const { data } = useData<Row>(scoped("/client/appointments?when=upcoming&limit=5", clientId));
+  const rows: Row[] = data?.appointments ?? [];
+  return (
+    <Card title="Upcoming" action={<Button variant="secondary" onClick={onSeeAll}>See all</Button>}>
+      {rows.length ? (
+        <ul className="divide-y divide-black/5">
+          {rows.map((r) => (
+            <li key={r.id} className="flex items-center justify-between gap-3 py-2 text-sm">
+              <div className="min-w-0">
+                <p className="truncate text-gray-900">{r.customer_name ?? "—"} <span className="text-xs text-gray-500 tabular-nums">{r.phone_number}</span></p>
+                <p className="text-xs text-gray-600">{r.kind_label}</p>
+              </div>
+              <span className="whitespace-nowrap text-gray-800">{formatTime(r.at)}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <Empty>No upcoming demos, meetings or callbacks.</Empty>
+      )}
+    </Card>
   );
 }
 
@@ -452,6 +501,7 @@ function Campaigns({ clientId, onViewCalls }: { clientId?: string; onViewCalls: 
   const { data: products } = useData<Row[]>(scoped("/client/products", clientId));
   const [name, setName] = useState("");
   const [sku, setSku] = useState("");
+  const [language, setLanguage] = useState("hinglish");
   const [uploadFor, setUploadFor] = useState<string | null>(null);
   const [leadsFor, setLeadsFor] = useState<string | null>(null);
   const [message, setMessage] = useState<{ error?: string; success?: string }>({});
@@ -469,7 +519,7 @@ function Campaigns({ clientId, onViewCalls }: { clientId?: string; onViewCalls: 
   function create(e: FormEvent) {
     e.preventDefault();
     void act(async () => {
-      await post(scoped("/client/campaigns", clientId), { name, product_skus: [sku || skus[0]] });
+      await post(scoped("/client/campaigns", clientId), { name, product_skus: [sku || skus[0]], language });
       setName("");
       return "Campaign created. Add leads, then start it.";
     });
@@ -480,13 +530,14 @@ function Campaigns({ clientId, onViewCalls }: { clientId?: string; onViewCalls: 
       <Message error={message.error} success={message.success} />
       <Card title="New campaign">
         {skus.length === 0 ? <Empty>Your products have not been set up yet. Please contact your account manager.</Empty> : (
-          <form onSubmit={create} className="grid gap-3 sm:grid-cols-3 items-end">
+          <form onSubmit={create} className="grid gap-3 sm:grid-cols-4 items-end">
             <Field label="Name"><Input value={name} onChange={(e) => setName(e.target.value)} required minLength={2} /></Field>
             <Field label="Product">
               <Select value={sku || skus[0]} onChange={(e) => setSku(e.target.value)}>
                 {skus.map((s) => <option key={s}>{s}</option>)}
               </Select>
             </Field>
+            <Field label="Language"><LanguageSelect value={language} onChange={setLanguage} /></Field>
             <Button type="submit" className="justify-self-start">Create campaign</Button>
           </form>
         )}
@@ -499,6 +550,12 @@ function Campaigns({ clientId, onViewCalls }: { clientId?: string; onViewCalls: 
           columns={[
             { label: "Name", render: (c) => c.name },
             { label: "Status", render: (c) => <StatusTag status={c.status} /> },
+            { label: "Language", render: (c) => (
+              <LanguageSelect value={c.language} onChange={(value) => act(async () => {
+                await put(scoped(`/client/campaigns/${c.id}/language`, clientId), { language: value });
+                return "Language changed. It applies from the next call.";
+              })} />
+            ) },
             { label: "Leads", align: "right", render: (c) => formatNumber(c.leads) },
             { label: "Waiting to dial", align: "right", render: (c) => formatNumber(c.queued) },
             { label: "", render: (c) => (
@@ -525,6 +582,15 @@ function Campaigns({ clientId, onViewCalls }: { clientId?: string; onViewCalls: 
       {uploadFor && <LeadUpload campaignId={uploadFor} clientId={clientId} onDone={(text) => { setUploadFor(null); setMessage({ success: text }); void reload(); }} onClose={() => setUploadFor(null)} />}
       {leadsFor && <Leads campaignId={leadsFor} clientId={clientId} onClose={() => setLeadsFor(null)} />}
     </>
+  );
+}
+
+function LanguageSelect({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  return (
+    <Select value={value} onChange={(e) => onChange(e.target.value)} aria-label="Call language">
+      <option value="hinglish">Hindi</option>
+      <option value="english">English</option>
+    </Select>
   );
 }
 
@@ -676,6 +742,238 @@ function OptOuts({ clientId }: { clientId?: string }) {
             { label: "Added", render: (r) => formatTime(r.at) },
           ]}
         />
+      </Card>
+    </>
+  );
+}
+
+// ── Appointments ─────────────────────────────────────────────
+function Appointments({ clientId }: { clientId?: string }) {
+  const [campaignId, setCampaignId] = useState("");
+  const [kind, setKind] = useState("");
+  const [when, setWhen] = useState("upcoming");
+  const { data: campaignList } = useData<Row[]>(scoped("/client/campaigns", clientId));
+  const params = new URLSearchParams({ when });
+  if (campaignId) params.set("campaign_id", campaignId);
+  if (kind) params.set("kind", kind);
+  const { data, error } = useData<Row>(scoped(`/client/appointments?${params}`, clientId));
+  const names = new Map<string, string>((campaignList ?? []).map((c) => [c.id, c.name]));
+
+  return (
+    <Card title="Demos, meetings and callbacks">
+      <div className="mb-3 flex flex-wrap items-end gap-3">
+        <Field label="Campaign">
+          <Select value={campaignId} onChange={(e) => setCampaignId(e.target.value)}>
+            <option value="">All campaigns</option>
+            {(campaignList ?? []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </Select>
+        </Field>
+        <Field label="Type">
+          <Select value={kind} onChange={(e) => setKind(e.target.value)}>
+            <option value="">All</option>
+            <option value="demo">Demos</option>
+            <option value="human_expert_callback">Meetings</option>
+            <option value="callback">Callbacks</option>
+          </Select>
+        </Field>
+        <Field label="When">
+          <Select value={when} onChange={(e) => setWhen(e.target.value)}>
+            <option value="upcoming">Upcoming</option>
+            <option value="past">Past</option>
+            <option value="all">All</option>
+          </Select>
+        </Field>
+      </div>
+      <Message error={error} />
+      <Table<Row>
+        rows={data?.appointments ?? []}
+        rowKey={(r) => r.id}
+        empty={when === "upcoming" ? "No upcoming demos, meetings or callbacks." : "No demos, meetings or callbacks here."}
+        columns={[
+          { label: "When", render: (r) => <span className="whitespace-nowrap">{formatTime(r.at)}</span> },
+          { label: "Type", render: (r) => r.kind_label },
+          { label: "Customer", render: (r) => (
+            <div>
+              <p className="text-gray-900">{r.customer_name ?? "—"}</p>
+              <p className="text-xs text-gray-500 tabular-nums">{r.phone_number}</p>
+            </div>
+          ) },
+          ...(campaignId ? [] : [{ label: "Campaign", render: (r: Row) => names.get(r.campaign_id) ?? "—" }]),
+          { label: "Status", render: (r) => r.status },
+        ]}
+      />
+    </Card>
+  );
+}
+
+// ── Agent setup (free trial) ─────────────────────────────────
+type SetupProduct = { name: string; price_inr: string; billing_period: string; description: string; features: string };
+const blankProduct: SetupProduct = { name: "", price_inr: "", billing_period: "monthly", description: "", features: "" };
+
+function AgentSetup({ clientId, onSaved }: { clientId?: string; onSaved: () => void }) {
+  const { data } = useData<Row>(scoped("/client/setup", clientId));
+  const [company, setCompany] = useState("");
+  const [about, setAbout] = useState("");
+  const [products, setProducts] = useState<SetupProduct[]>([blankProduct]);
+  const [feedback, setFeedback] = useState<{ error?: string; success?: string }>({});
+  const [doc, setDoc] = useState<File | null>(null);
+  const [reading, setReading] = useState(false);
+
+  useEffect(() => {
+    if (!data) return;
+    setCompany(data.company_name.includes("@") ? "" : data.company_name);
+    setAbout(data.about ?? "");
+    if (data.products.length) {
+      setProducts(data.products.map((p: Row) => ({ name: p.name, price_inr: String(p.price_inr), billing_period: p.billing_period,
+        description: p.description, features: (p.features ?? []).join("\n") })));
+    }
+  }, [data]);
+
+  if (!data) return <Empty>Loading…</Empty>;
+  const change = (i: number, key: keyof SetupProduct, value: string) =>
+    setProducts(products.map((p, j) => (j === i ? { ...p, [key]: value } : p)));
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    try {
+      await put(scoped("/client/setup", clientId), {
+        company_name: company, about,
+        products: products.map((p) => ({ name: p.name, price_inr: Number(p.price_inr), billing_period: p.billing_period,
+          description: p.description, features: p.features.split("\n").map((f) => f.trim()).filter(Boolean) })),
+      });
+      setFeedback({ success: "Saved. Your agent uses this from the next test call." });
+      onSaved();
+    } catch (err) {
+      setFeedback({ error: (err as Error).message });
+    }
+  }
+
+  async function fillFromDocument() {
+    if (!doc) return;
+    const form = new FormData();
+    form.append("file", doc);
+    setReading(true);
+    try {
+      const draft = await upload(scoped("/client/setup/from-document", clientId), form);
+      if (draft.company_name) setCompany(draft.company_name);
+      if (draft.about) setAbout(draft.about);
+      if (draft.products.length) {
+        setProducts(draft.products.map((p: Row) => ({ name: p.name, price_inr: p.price_inr == null ? "" : String(p.price_inr),
+          billing_period: p.billing_period, description: p.description, features: p.features.join("\n") })));
+      }
+      setFeedback({ success: `Filled in from ${doc.name}. Check every field, especially prices, then save.` });
+    } catch (err) {
+      setFeedback({ error: (err as Error).message });
+    } finally {
+      setReading(false);
+    }
+  }
+
+  if (!data.editable) {
+    return <Card title="Your agent"><Empty>Your agent's content is managed by our team. Contact us to change it.</Empty></Card>;
+  }
+  return (
+    <form onSubmit={save} className="space-y-4">
+      <Message error={feedback.error} success={feedback.success} />
+      <Card title="Fill from a document">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="min-w-64"><Field label="File" hint="A brochure, price list or website text: .txt, .md, .csv or .pdf, up to 5 MB. We fill in the form below; nothing is saved until you press Save."><Input type="file" accept=".txt,.md,.csv,.pdf" onChange={(e) => setDoc(e.target.files?.[0] ?? null)} /></Field></div>
+          <Button type="button" variant="secondary" disabled={!doc || reading} onClick={fillFromDocument}>{reading ? "Reading…" : "Fill in the form"}</Button>
+        </div>
+      </Card>
+      <Card title="Your company">
+        <div className="grid gap-3">
+          <Field label="Company name" hint="Your agent says it on every call"><Input value={company} onChange={(e) => setCompany(e.target.value)} required minLength={2} /></Field>
+          <Field label="About the company" hint="2-3 lines on what you do and for whom. The agent uses it to introduce you.">
+            <Textarea value={about} onChange={setAbout} rows={4} />
+          </Field>
+        </div>
+      </Card>
+      {products.map((p, i) => (
+        <Card key={i} title={`Product ${i + 1}`} action={products.length > 1 && (
+          <Button type="button" variant="secondary" onClick={() => setProducts(products.filter((_, j) => j !== i))}>Remove</Button>
+        )}>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <Field label="Name"><Input value={p.name} onChange={(e) => change(i, "name", e.target.value)} required /></Field>
+            <Field label="Price (₹)"><Input type="number" min={0} value={p.price_inr} onChange={(e) => change(i, "price_inr", e.target.value)} required /></Field>
+            <Field label="Billing">
+              <Select value={p.billing_period} onChange={(e) => change(i, "billing_period", e.target.value)}>
+                <option value="monthly">Per month</option>
+                <option value="annual">Per year</option>
+                <option value="one_time">One-time</option>
+              </Select>
+            </Field>
+            <div className="sm:col-span-3">
+              <Field label="What it does" hint="One or two sentences, in simple words"><Textarea value={p.description} onChange={(v) => change(i, "description", v)} rows={3} /></Field>
+            </div>
+            <div className="sm:col-span-3">
+              <Field label="Key features" hint="One per line"><Textarea value={p.features} onChange={(v) => change(i, "features", v)} rows={3} /></Field>
+            </div>
+          </div>
+        </Card>
+      ))}
+      <div className="flex flex-wrap gap-2">
+        {products.length < 10 && <Button type="button" variant="secondary" onClick={() => setProducts([...products, blankProduct])}>Add another product</Button>}
+        <Button type="submit">Save and test my agent</Button>
+      </div>
+    </form>
+  );
+}
+
+// ── Plans ────────────────────────────────────────────────────
+function Plans({ clientId, overview }: { clientId?: string; overview: Row | null }) {
+  const { data, reload } = useData<Row>(scoped("/client/plans", clientId));
+  const [feedback, setFeedback] = useState<{ error?: string; success?: string }>({});
+
+  async function ask(planName?: string) {
+    try {
+      await post(scoped("/client/enquiries", clientId), { plan_name: planName ?? null });
+      setFeedback({ success: "Thanks! Our team will contact you about pricing and billing within one working day." });
+      await reload();
+    } catch (err) {
+      setFeedback({ error: (err as Error).message });
+    }
+  }
+
+  if (!data || !overview) return <Empty>Loading…</Empty>;
+  const current = data.plans.find((p: Row) => p.id === data.current_plan_id);
+  return (
+    <>
+      <Message error={feedback.error} success={feedback.success} />
+      <Card title="Your plan">
+        {data.is_trial ? (
+          <p className="text-sm text-gray-700">
+            You're on a free trial with {formatNumber(Math.max(0, overview.minutes.remaining), 1)} minutes left for browser test
+            calls. Phone calls to your leads start once you buy a plan.
+          </p>
+        ) : (
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Stat label="Plan" value={current?.name ?? overview.plan?.name ?? "—"} />
+            <Stat label="Minutes left" value={formatNumber(overview.minutes.remaining)} />
+            <Stat label="Used this month" value={formatNumber(overview.minutes.used_this_month)} note="minutes" />
+          </div>
+        )}
+      </Card>
+      <Card title="Plans" action={<Button onClick={() => ask()}>Talk to us about pricing</Button>}>
+        {data.pricing_enquiry_open && <p className="mb-3 text-sm text-gray-600">We have your pricing request and will be in touch soon.</p>}
+        {data.plans.length ? (
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {data.plans.map((p: Row) => (
+              <div key={p.id} className={`lift rounded-3xl border p-5 ${p.id === data.current_plan_id ? "border-neutral-900 bg-white" : "border-black/10 bg-white/60"}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-medium text-gray-900">{p.name}</h3>
+                  {p.id === data.current_plan_id && <StatusTag status="active" />}
+                </div>
+                <p className="mt-2 text-2xl font-semibold tracking-tight tabular-nums">{formatNumber(p.included_minutes)}</p>
+                <p className="text-xs text-gray-600">minutes included</p>
+                {p.id !== data.current_plan_id && (
+                  <Button variant="secondary" className="mt-4" onClick={() => ask(p.name)}>Ask about this plan</Button>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : <Empty>Plans are shared by our team. Ask us about pricing.</Empty>}
+        <p className="mt-4 text-xs text-gray-500">Prices and billing are agreed with our team. More minutes are added once payment is confirmed.</p>
       </Card>
     </>
   );

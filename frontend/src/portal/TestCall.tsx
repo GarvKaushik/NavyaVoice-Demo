@@ -13,7 +13,14 @@ import { Button, Card, Empty, Field, Input, Message, Select, useData } from "./u
 
 type Mode = "browser" | "phone";
 
-export default function TestCall({ clientId, used, limit }: { clientId?: string; used: number; limit: number }) {
+export default function TestCall({ clientId, used, limit, trial = false, trialLeft = 0, onSeePlans }: {
+  clientId?: string;
+  used: number;
+  limit: number;
+  trial?: boolean;
+  trialLeft?: number;
+  onSeePlans?: () => void;
+}) {
   const { data: campaigns } = useData<Row[]>(scoped("/client/campaigns", clientId));
   const [mode, setMode] = useState<Mode>("browser");
   const [campaignId, setCampaignId] = useState("");
@@ -44,7 +51,12 @@ export default function TestCall({ clientId, used, limit }: { clientId?: string;
       </div>
 
       {mode === "browser" ? (
-        <BrowserCall clientId={clientId} campaignId={selected} used={used} limit={limit} />
+        <BrowserCall clientId={clientId} campaignId={selected} used={used} limit={limit} trial={trial} trialLeft={trialLeft} />
+      ) : trial ? (
+        <div className="mt-3 max-w-2xl rounded-2xl bg-lime-200/60 p-4 text-sm text-gray-800">
+          Phone calls start once you buy a plan. Until then, test your agent in this browser.
+          {onSeePlans && <Button className="ml-3" onClick={onSeePlans}>See plans</Button>}
+        </div>
       ) : (
         <PhoneCall clientId={clientId} campaignId={selected} />
       )}
@@ -66,7 +78,14 @@ function useNow(active: boolean): number {
 
 const seconds = (from: number, to: number) => Math.max(0, Math.floor((to - from) / 1000));
 
-function BrowserCall({ clientId, campaignId, used, limit }: { clientId?: string; campaignId: string; used: number; limit: number }) {
+function BrowserCall({ clientId, campaignId, used, limit, trial = false, trialLeft = 0 }: {
+  clientId?: string;
+  campaignId: string;
+  used: number;
+  limit: number;
+  trial?: boolean;
+  trialLeft?: number;
+}) {
   const [name, setName] = useState("Rajesh");
   const call = useAgentCall();
   const liveSince = useRef<number | null>(null);
@@ -89,8 +108,9 @@ function BrowserCall({ clientId, campaignId, used, limit }: { clientId?: string;
   return (
     <div className="mt-3 grid max-w-2xl gap-3">
       <p className="text-sm text-gray-600">
-        Talk to your agent from this browser before calling real leads. It uses your real script and voice, but does not
-        use your call minutes. {used} of {limit} free test minutes used this month.
+        {trial
+          ? `Talk to your agent from this browser. It uses your real script and voice, and your free trial minutes (${Math.max(0, Math.round(trialLeft * 10) / 10)} left).`
+          : `Talk to your agent from this browser before calling real leads. It uses your real script and voice, but does not use your call minutes. ${used} of ${limit} free test minutes used this month.`}
       </p>
       <Field label="Name the agent should call you">
         <Input value={name} onChange={(e) => setName(e.target.value)} disabled={call.state !== "idle"} />

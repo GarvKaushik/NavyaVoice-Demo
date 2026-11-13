@@ -8,6 +8,7 @@ import { formatInr, formatNumber, formatTime, get, patch, post, put } from "./ap
 import type { Row } from "./api";
 import { Button, Card, Empty, Field, Input, Message, Select, Shell, SidebarBox, Stat, StatusTag, Table, Textarea, useData, useHashRoute } from "./ui";
 import type { NavItem } from "./ui";
+import Account from "./Account";
 
 type Feedback = { error?: string; success?: string };
 
@@ -20,21 +21,24 @@ export default function AdminApp({ email, onSignOut, onOpenClient }: {
   const { data: overview, reload } = useData<Row>("/admin/overview");
   const pendingCredits = overview?.totals.pending_credit_requests ?? 0;
   const pendingDocuments = overview?.totals.pending_documents ?? 0;
+  const newEnquiries = overview?.totals.new_enquiries ?? 0;
   const nav: NavItem[] = [
     { key: "overview", label: "Overview", icon: "home" },
+    { key: "enquiries", label: "Enquiries", icon: "megaphone", group: "Clients", count: newEnquiries },
     { key: "clients", label: "Add client", icon: "userPlus", group: "Clients" },
     { key: "plans", label: "Plans", icon: "layers", group: "Clients" },
     { key: "credits", label: "Credit requests", icon: "coins", group: "Approvals", count: pendingCredits },
     { key: "knowledge", label: "Knowledge approvals", icon: "fileCheck", group: "Approvals", count: pendingDocuments },
     { key: "console", label: "Script console", icon: "terminal", group: "Tools" },
     { key: "audit", label: "Audit log", icon: "scroll", group: "Tools" },
+    { key: "account", label: "Account", icon: "shield", group: "Tools" },
   ];
   const [section, detail] = route.split("/");
   const page = section === "client-admin" ? "overview" : route;
   const waiting = pendingCredits + pendingDocuments;
 
   return (
-    <Shell title="Navyakta AI Admin" subtitle={email} nav={nav} route={page} onNavigate={navigate} onSignOut={onSignOut}
+    <Shell title="Navix AI Admin" subtitle={email} nav={nav} route={page} onNavigate={navigate} onSignOut={onSignOut}
       footer={overview && (
         <SidebarBox label="Waiting for approval" value={formatNumber(waiting)}
           action={waiting > 0 && (
@@ -48,6 +52,8 @@ export default function AdminApp({ email, onSignOut, onOpenClient }: {
       {section === "credits" && <CreditRequests onChange={reload} />}
       {section === "knowledge" && <KnowledgeReview onChange={reload} />}
       {section === "audit" && <Audit />}
+      {section === "enquiries" && <Enquiries onChange={reload} />}
+      {section === "account" && <Account email={email} />}
     </Shell>
   );
 }
@@ -93,6 +99,7 @@ function Overview({ overview, onSelect }: { overview: Row | null; onSelect: (id:
 function NewClient({ onCreated }: { onCreated: (id: string) => void }) {
   const { data: plans } = useData<Row[]>("/admin/plans");
   const [form, setForm] = useState({ name: "", company_name: "", plan_id: "", initial_minutes: "", caller_id: "" });
+  const [trial, setTrial] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const set = (key: keyof typeof form) => (e: { target: { value: string } }) => setForm({ ...form, [key]: e.target.value });
 
@@ -102,6 +109,7 @@ function NewClient({ onCreated }: { onCreated: (id: string) => void }) {
       const created = await post("/admin/clients", {
         name: form.name, company_name: form.company_name, plan_id: form.plan_id || null,
         initial_minutes: form.initial_minutes === "" ? null : Number(form.initial_minutes), caller_id: form.caller_id || null,
+        is_trial: trial,
       });
       onCreated(created.id);
     } catch (err) {
@@ -122,6 +130,10 @@ function NewClient({ onCreated }: { onCreated: (id: string) => void }) {
         </Field>
         <Field label="Starting minutes" hint="Leave empty to use the plan's minutes"><Input type="number" min={0} value={form.initial_minutes} onChange={set("initial_minutes")} /></Field>
         <Field label="Assigned phone number" hint="Each number can belong to one client. It must also be on the Plivo trunk."><Input value={form.caller_id} onChange={set("caller_id")} placeholder="+911401234567" /></Field>
+        <label className="flex items-center gap-2 text-sm text-gray-800 sm:col-span-2">
+          <input type="checkbox" checked={trial} onChange={(e) => setTrial(e.target.checked)} />
+          Free trial: 50 browser test minutes, no phone calls until they buy a plan
+        </label>
         <div className="sm:col-span-2"><Message error={error} /></div>
         <div className="sm:col-span-2"><Button type="submit">Create client</Button></div>
       </form>
@@ -145,6 +157,7 @@ function ClientDetail({ clientId, onChange, onOpenClient }: { clientId: string; 
       caller_id: client.caller_id ?? "", voice_id: client.voice_id ?? "", agent_persona_name: client.agent_persona_name ?? "",
       complaint_contact: client.complaint_contact ?? "", max_concurrent_calls: client.max_concurrent_calls,
       transfer_numbers: (client.transfer_numbers ?? []).join(", "), payment_links_enabled: client.payment_links_enabled,
+      is_trial: client.is_trial,
       crm_webhook_url: client.crm_webhook_url ?? "", crm_webhook_secret: "",
     });
   }, [client]);
@@ -209,8 +222,11 @@ function ClientDetail({ clientId, onChange, onOpenClient }: { clientId: string; 
           <Field label="Voice ID" hint="Empty uses the default voice"><Input value={form.voice_id} onChange={set("voice_id")} /></Field>
           <Field label="Complaint contact"><Input value={form.complaint_contact} onChange={set("complaint_contact")} /></Field>
           <Field label="Sales desk numbers" hint="For warm transfers, comma-separated"><Input value={form.transfer_numbers} onChange={set("transfer_numbers")} /></Field>
-          <Field label="CRM webhook URL"><Input value={form.crm_webhook_url} onChange={set("crm_webhook_url")} /></Field>
-          <Field label="CRM webhook secret" hint={client.crm_webhook_secret_set ? "Set. Leave empty to keep it." : "Not set"}><Input type="password" value={form.crm_webhook_secret} onChange={set("crm_webhook_secret")} autoComplete="new-password" /></Field>
+          {/* CRM webhook fields are hidden until CRM/Excel sync is offered (future plan); the backend still supports them */}
+          <label className="flex items-center gap-2 text-sm text-gray-800 sm:col-span-2 lg:col-span-3">
+            <input type="checkbox" checked={form.is_trial} onChange={(e) => setForm({ ...form, is_trial: e.target.checked })} />
+            Free trial: browser test calls only. Untick once they buy a plan and their content is reviewed, to turn on phone calls.
+          </label>
           <label className="flex items-center gap-2 text-sm text-gray-800 sm:col-span-2 lg:col-span-3">
             <input type="checkbox" checked={form.payment_links_enabled} onChange={(e) => setForm({ ...form, payment_links_enabled: e.target.checked })} />
             Allow payment links. All links currently settle to the one Razorpay account in settings.
@@ -263,14 +279,18 @@ function ContentEditor({ clientId, content, run }: { clientId: string; content: 
   const example = [{ sku: "GOLD", plan: "Monthly", name: "Gold Plan", price_inr: 999, billing_period: "monthly", description: "One line on what this is", features: ["Feature one"], eta_text: "10 minute mein activation" }];
   const [products, setProducts] = useState(pretty(content.products.length ? content.products : example));
   const [policies, setPolicies] = useState(pretty(content.policies));
-  const [stages, setStages] = useState(pretty(content.stage_prompts));
+  const { INTRODUCTION: intro = "", ...stagePrompts } = (content.stage_prompts ?? {}) as Row;
+  const [about, setAbout] = useState<string>(intro);
+  const [stages, setStages] = useState(pretty(stagePrompts));
   const [objections, setObjections] = useState(pretty(content.objection_playbooks));
   const [error, setError] = useState<string | null>(null);
 
   function save() {
     let body: Row;
     try {
-      body = { products: JSON.parse(products), policies: JSON.parse(policies), stage_prompts: JSON.parse(stages), objection_playbooks: JSON.parse(objections) };
+      // The company introduction is stored as the INTRODUCTION script entry, which the agent reads
+      const stagePromptsBody = { ...JSON.parse(stages), ...(about.trim() ? { INTRODUCTION: about.trim() } : {}) };
+      body = { products: JSON.parse(products), policies: JSON.parse(policies), stage_prompts: stagePromptsBody, objection_playbooks: JSON.parse(objections) };
       setError(null);
     } catch {
       setError("One of the boxes is not valid JSON. Check for missing commas or quotes.");
@@ -287,6 +307,11 @@ function ContentEditor({ clientId, content, run }: { clientId: string; content: 
       <p className="mb-3 text-xs text-gray-600">Saving approves this content for live calls. Prices come only from Products. Keep objection answers to about 18 words. Objection types: price, timing, trust, competitor, need. Policy topics: refunds, cancellation, data_residency.</p>
       <Message error={error} />
       <div className="grid gap-3 lg:grid-cols-2">
+        <div className="lg:col-span-2">
+          <Field label="About the company" hint="2-3 short lines on what the company does, in plain text. The agent uses it to introduce the company; products are named from Products.">
+            <Textarea value={about} onChange={setAbout} rows={4} />
+          </Field>
+        </div>
         <Field label="Products"><Textarea value={products} onChange={setProducts} rows={14} /></Field>
         <Field label="Objection answers"><Textarea value={objections} onChange={setObjections} rows={14} /></Field>
         <Field label="Policies"><Textarea value={policies} onChange={setPolicies} rows={10} /></Field>
@@ -446,6 +471,61 @@ function KnowledgeReview({ onChange }: { onChange: () => Promise<void> }) {
 }
 
 // ── Audit log ────────────────────────────────────────────────
+// ── Enquiries ────────────────────────────────────────────────
+const ENQUIRY_STATUSES = ["new", "contacted", "converted"];
+
+function Enquiries({ onChange }: { onChange: () => Promise<void> }) {
+  const [status, setStatus] = useState("");
+  const { data, error, reload } = useData<Row[]>(`/admin/enquiries${status ? `?status=${status}` : ""}`);
+  const [feedback, setFeedback] = useState<Feedback>({});
+  const whatsapp = (n: string) => `https://wa.me/${n.replace(/\D/g, "")}`;
+
+  async function change(id: number, next: string) {
+    try {
+      await patch(`/admin/enquiries/${id}`, { status: next });
+      setFeedback({});
+      await reload();
+      await onChange();
+    } catch (err) {
+      setFeedback({ error: (err as Error).message });
+    }
+  }
+
+  return (
+    <Card title="Enquiries" action={
+      <Select value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Show">
+        <option value="">All</option>
+        {ENQUIRY_STATUSES.map((s) => <option key={s} value={s}>{s[0].toUpperCase() + s.slice(1)}</option>)}
+      </Select>
+    }>
+      <Message error={error || feedback.error} />
+      <Table<Row>
+        rows={data ?? []}
+        rowKey={(r) => r.id}
+        empty="No enquiries yet."
+        columns={[
+          { label: "When", render: (r) => <span className="whitespace-nowrap">{formatTime(r.created_at)}</span> },
+          { label: "Type", render: (r) => ({ pricing: "Pricing (client)", signup: "Trial sign-up" } as Row)[r.topic] ?? "Services" },
+          { label: "Person", render: (r) => r.person_name },
+          { label: "Contact", render: (r) => (
+            <div className="text-xs tabular-nums">
+              {r.phone_number && <p>{r.phone_number}</p>}
+              {r.whatsapp_number && <a className="text-violet-700 underline" href={whatsapp(r.whatsapp_number)} target="_blank" rel="noreferrer">WhatsApp {r.whatsapp_number}</a>}
+            </div>
+          ) },
+          { label: "Business", render: (r) => [r.business_name, r.business_type].filter(Boolean).join(" · ") || "—" },
+          { label: "Note", render: (r) => <span className="text-xs text-gray-600">{r.note ?? "—"}</span> },
+          { label: "Status", render: (r) => (
+            <Select value={r.status} onChange={(e) => change(r.id, e.target.value)} aria-label="Status">
+              {ENQUIRY_STATUSES.map((s) => <option key={s} value={s}>{s[0].toUpperCase() + s.slice(1)}</option>)}
+            </Select>
+          ) },
+        ]}
+      />
+    </Card>
+  );
+}
+
 function Audit() {
   const { data } = useData<Row[]>("/admin/audit?limit=200");
   return (

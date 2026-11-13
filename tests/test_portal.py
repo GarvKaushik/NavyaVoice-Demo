@@ -567,7 +567,7 @@ async def test_new_client_setup_through_admin_api():
     created = (await admin.post("/api/admin/clients", json={"name": "Acme", "company_name": "Acme Ltd",
                                                             "initial_minutes": 30000})).json()
     client_id = created["id"]
-    assert created["remaining_minutes"] == 30000 and created["max_concurrent_calls"] == 5
+    assert created["remaining_minutes"] == 30000 and created["max_concurrent_calls"] == 3
     login = (await admin.post(f"/api/admin/clients/{client_id}/users", json={"email": f"{_id('o')}@acme.test"})).json()
     assert len(login["temporary_password"]) >= 10
     content = {"products": [{"sku": "gold", "name": "Gold", "price_inr": 999}],
@@ -765,3 +765,243 @@ async def test_demo_line_has_an_overall_cap(monkeypatch, fake_portal_dialer):
     assert busy.status_code == 429 and "busy" in busy.json()["detail"]
     await _clear_queue()  # the first demo call ended
     assert (await _demo(http, f"c-{uuid.uuid4().hex}")).status_code == 200
+
+
+async def test_booked_demos_and_callbacks_show_as_appointments_for_their_client_only():
+    client, other = await make_client(), await make_client()
+    campaign = await make_campaign(client)
+    lead = await make_lead(client, campaign)
+    k = await load_knowledge(campaign)
+    tools = CallTools(CallIdentity(_id("call"), lead, campaign, "+919", "R", client_id=client), k, AuthorizationContext())
+    slots = await tools.execute("list_demo_slots", {})
+    assert slots["slots"][0]["slot_id"].startswith("gen-")  # sales desk hours: no slot table for this client
+    booked = await tools.execute("book_demo", {"slot_id": slots["slots"][0]["slot_id"]})
+    assert booked["ok"] and "call ke baad details" in booked["approved_phrasing"]  # nothing is sent yet
+    assert (await tools.execute("schedule_callback", {"when": "kal shaam 5 baje"}))["ok"]
+
+    http = await signed_in("client", client)
+    rows = (await http.get("/api/client/appointments")).json()["appointments"]
+    assert {r["kind"] for r in rows} == {"demo", "callback"}
+    assert rows == sorted(rows, key=lambda r: r["at"])
+    demo = next(r for r in rows if r["kind"] == "demo")
+    assert demo["lead_id"] == lead and demo["campaign_id"] == campaign and demo["duration_minutes"] == 15
+    assert len((await http.get("/api/client/appointments", params={"kind": "demo"})).json()["appointments"]) == 1
+    assert (await http.get("/api/client/appointments", params={"when": "past"})).json()["appointments"] == []
+    csv_resp = await http.get("/api/client/appointments", params={"format": "csv"})
+    assert csv_resp.headers["content-type"].startswith("text/csv") and "Demo" in csv_resp.text
+
+    assert (await (await signed_in("client", other)).get("/api/client/appointments")).json()["appointments"] == []
+
+
+async def test_campaign_language_is_chosen_changed_and_used_on_calls():
+    from agent.dialogue import DialogueEngine
+    from agent.prompts import build_messages
+    from speech.phrase_cache import PreRenderedPhraseCache as P
+
+    assert set(P.ENGLISH_TEXTS) == set(P.CANONICAL_TEXTS)  # every fixed line has an English version
+    client = await make_client()
+    await make_campaign(client)  # creates the client's product X
+    http = await signed_in("client", client)
+    made = (await http.post("/api/client/campaigns", json={"name": "En", "product_skus": ["X"], "language": "english"})).json()
+    assert (await http.post("/api/client/campaigns", json={"name": "Bad", "product_skus": ["X"], "language": "tamil"})).status_code == 422
+    listed = {c["id"]: c["language"] for c in (await http.get("/api/client/campaigns")).json()}
+    assert listed[made["id"]] == "english"
+
+    k = await load_knowledge(made["id"])
+    engine = DialogueEngine(CallIdentity("c", "l", made["id"], "+919", "Rajesh", client_id=client), k, None)
+    opening = engine.opening()
+    assert opening[1].text == "Am I speaking with Rajesh?" and "This call is recorded" in opening[0].text
+    system = build_messages(k, engine.stage, engine.state, "Rajesh", [])[0]["content"]
+    assert "only natural, warm, simple Indian English" in system
+    assert system.endswith("never copy the Hindi words.")  # last, so the Hinglish examples above are not copied
+    engine.tools.price_allowed = True  # as after the customer asks
+    price = await engine.tools.execute("get_price", {"sku": "X", "plan": "Monthly"})
+    assert price["approved_phrasing"].endswith("costs ₹500 per month.")
+
+    assert (await http.put(f"/api/client/campaigns/{made['id']}/language", json={"language": "hinglish"})).json() == {"language": "hinglish"}
+    assert (await load_knowledge(made["id"])).language == "hinglish"
+    assert (await http.put(f"/api/client/campaigns/{made['id']}/language", json={"language": "hindi"})).status_code == 422
+    other = await signed_in("client", await make_client())
+    assert (await other.put(f"/api/client/campaigns/{made['id']}/language", json={"language": "english"})).status_code == 404
+
+
+async def test_landing_enquiry_is_validated_rate_limited_and_listed_for_admins():
+    from database.models import Enquiry
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test",
+                             headers={"x-forwarded-for": _id("ip")})
+    body = {"person_name": "Asha", "phone_number": "98765 43210", "whatsapp_number": "098765-43210",
+            "business_name": "Asha Stores", "business_type": "Retail"}
+    assert (await http.post("/api/enquiries", json=body)).json() == {"status": "received"}
+    assert (await http.post("/api/enquiries", json={**body, "phone_number": "abc"})).status_code == 422
+    assert (await http.post("/api/enquiries", json={**body, "website": "spam.example"})).json() == {"status": "received"}
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(select(Enquiry).where(Enquiry.person_name == "Asha"))).scalars().all()
+    assert len(rows) == 1 and rows[0].phone_number == "+919876543210" and rows[0].whatsapp_number == "+919876543210"
+    for _ in range(get_settings().ENQUIRIES_PER_HOUR):
+        last = await http.post("/api/enquiries", json=body)
+    assert last.status_code == 429
+
+    assert (await (await signed_in("client", await make_client())).get("/api/admin/enquiries")).status_code == 403
+    admin = await signed_in("admin")
+    listed = (await admin.get("/api/admin/enquiries", params={"status": "new"})).json()
+    mine = next(e for e in listed if e["id"] == rows[0].id)
+    assert mine["business_type"] == "Retail"
+    assert (await admin.patch(f"/api/admin/enquiries/{mine['id']}", json={"status": "contacted"})).json() == {"status": "contacted"}
+    assert (await http.get("/api/enquiries")).status_code == 405  # the public side can only send
+
+
+async def test_trial_clients_test_in_the_browser_only_and_can_ask_about_pricing(monkeypatch, fake_portal_dialer):
+    client = await make_client(minutes=100)
+    async with AsyncSessionLocal() as db:
+        (await db.get(Client, client)).is_trial = True
+        await db.commit()
+    campaign = await make_campaign(client, status="draft")
+    http = await signed_in("client", client)
+    overview = (await http.get("/api/client/overview")).json()
+    assert overview["client"]["is_trial"]
+    assert (await http.post(f"/api/client/campaigns/{campaign}/start")).status_code == 403
+    assert (await http.post("/api/client/phone-call", json={"campaign_id": campaign, "phone_number": "9876543210"})).status_code == 403
+    assert client not in await DialService()._eligible_clients()
+
+    plans = (await http.get("/api/client/plans")).json()
+    assert plans["is_trial"] and not plans["pricing_enquiry_open"]
+    assert all("rate_per_minute_inr" not in p for p in plans["plans"])  # prices are discussed, not listed
+    assert (await http.post("/api/client/enquiries", json={"plan_name": "P"})).json() == {"status": "received"}
+    assert (await http.get("/api/client/plans")).json()["pricing_enquiry_open"]
+
+
+async def test_logout_and_password_change_end_other_sessions():
+    import asyncio as aio
+    email, password = await make_user("client", await make_client())
+    def browser():
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test")
+    laptop, phone = browser(), browser()
+    for b in (laptop, phone):
+        assert (await b.post("/api/auth/login", json={"email": email, "password": password})).status_code == 200
+    await aio.sleep(1.1)  # session times are kept to the second
+    new = "a-brand-new-password"
+    assert (await laptop.post("/api/auth/password", json={"current_password": password, "new_password": new})).status_code == 200
+    assert (await laptop.get("/api/auth/me")).status_code == 200  # this device gets a fresh session
+    assert (await phone.get("/api/auth/me")).status_code == 401  # the other device is signed out
+
+    await aio.sleep(1.1)
+    assert (await phone.post("/api/auth/login", json={"email": email, "password": new})).status_code == 200
+    await aio.sleep(1.1)
+    await laptop.post("/api/auth/logout")
+    assert (await phone.get("/api/auth/me")).status_code == 401  # logout signs out everywhere
+
+
+async def test_security_headers_and_per_ip_login_limit(monkeypatch):
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test",
+                             headers={"x-forwarded-for": _id("ip")})
+    resp = await http.get("/api/demo")
+    assert resp.headers["x-frame-options"] == "DENY" and resp.headers["x-content-type-options"] == "nosniff"
+    monkeypatch.setattr(get_settings(), "LOGIN_MAX_FAILURES_PER_IP", 3)
+    for i in range(3):  # three different emails from one address
+        await http.post("/api/auth/login", json={"email": f"{_id('x')}@example.test", "password": "wrong"})
+    email, password = await make_user("client", await make_client())
+    assert (await http.post("/api/auth/login", json={"email": email, "password": password})).status_code == 429
+
+
+async def test_self_signup_creates_a_trial_account_and_tells_the_team():
+    from database.models import Enquiry
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test",
+                             headers={"x-forwarded-for": _id("ip")})
+    email = f"{_id('new')}@example.test"
+    body = {"email": email, "password": "long-enough-pass", "phone_number": "98765 43210"}
+    me = (await http.post("/api/auth/signup", json=body)).json()
+    assert me["role"] == "client" and me["email"] == email
+    overview = (await http.get("/api/client/overview")).json()  # signed in straight away
+    assert overview["client"]["is_trial"] and overview["minutes"]["remaining"] == get_settings().TRIAL_TEST_MINUTES
+    async with AsyncSessionLocal() as db:
+        note = (await db.execute(select(Enquiry).where(Enquiry.client_id == me["client_id"]))).scalar()
+    assert note.topic == "signup" and note.phone_number == "+919876543210"
+
+    assert (await http.post("/api/auth/signup", json=body)).status_code == 409  # one account per email
+    assert (await http.post("/api/auth/signup", json={**body, "email": "x@y.z", "password": "short"})).status_code == 422
+    assert (await http.post("/api/auth/signup", json={**body, "email": "not-an-email"})).status_code == 422
+    for i in range(get_settings().SIGNUPS_PER_DAY):
+        last = await http.post("/api/auth/signup", json={**body, "email": f"{_id('n')}@example.test"})
+    assert last.status_code == 429  # per address per day
+
+
+async def test_trial_client_sets_up_its_own_agent_and_can_test_it():
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test",
+                             headers={"x-forwarded-for": _id("ip")})
+    me = (await http.post("/api/auth/signup", json={"email": f"{_id('t')}@example.test", "password": "long-enough-pass",
+                                                    "phone_number": "9876543210"})).json()
+    assert (await http.get("/api/client/setup")).json()["editable"] is True
+    body = {"company_name": "Asha Stores", "about": "Hum kirana stores ko online laate hain.",
+            "products": [{"name": "Shop Online", "price_inr": 999, "billing_period": "monthly",
+                          "description": "Aapki dukaan ki website.", "features": ["Orders on WhatsApp", " "]}]}
+    saved = (await http.put("/api/client/setup", json=body)).json()
+    assert saved["campaign_created"]
+    k = await load_knowledge(saved["campaign_created"])
+    assert k.company_name == "Asha Stores" and k.company_intro.startswith("Hum kirana")
+    assert [c.features for c in k.catalog.values()] == [["Orders on WhatsApp"]]
+    assert (await http.get("/api/client/overview")).json()["client"]["name"] == "Asha Stores"
+    again = (await http.put("/api/client/setup", json={**body, "about": ""})).json()
+    assert again["campaign_created"] is None  # the campaign exists already
+    assert not (await load_knowledge(saved["campaign_created"])).company_intro
+
+    paid = await signed_in("client", await make_client())
+    assert (await paid.put("/api/client/setup", json=body)).status_code == 403  # after the trial the team owns content
+
+
+async def test_trial_client_fills_the_setup_form_from_a_document(monkeypatch):
+    from llm.client import LLMClient, Usage
+    seen = {}
+
+    async def fake_complete(self, messages, **kwargs):
+        seen["model"], seen["text"] = self.endpoints[0].model, messages[-1]["content"]
+        return json.dumps({"company_name": "Asha Stores", "about": "Kirana stores online.", "products": [
+            {"name": "Shop Online", "price_inr": 999, "billing_period": "annual", "features": ["Orders on WhatsApp", ""]},
+            {"name": "Delivery", "price_inr": "cheap", "billing_period": "weekly"},  # unclear values are dropped
+            {"price_inr": 5}]}), Usage()
+
+    monkeypatch.setattr(get_settings(), "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(LLMClient, "complete", fake_complete)
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test",
+                             headers={"x-forwarded-for": _id("ip")})
+    await http.post("/api/auth/signup", json={"email": f"{_id('d')}@example.test", "password": "long-enough-pass",
+                                              "phone_number": "9876543210"})
+    files = {"file": ("brochure.txt", "Asha Stores brings kirana shops online.".encode(), "text/plain")}
+    draft = (await http.post("/api/client/setup/from-document", files=files)).json()
+    assert seen == {"model": get_settings().OPENAI_MODEL, "text": "Asha Stores brings kirana shops online."}
+    assert draft["company_name"] == "Asha Stores"
+    assert draft["products"] == [
+        {"name": "Shop Online", "price_inr": 999.0, "billing_period": "annual", "description": "",
+         "features": ["Orders on WhatsApp"]},
+        {"name": "Delivery", "price_inr": None, "billing_period": "monthly", "description": "", "features": []}]
+    assert (await http.get("/api/client/setup")).json()["products"] == []  # a draft only; nothing saved
+
+    bad = {"file": ("photo.png", b"\x89PNG", "image/png")}
+    assert (await http.post("/api/client/setup/from-document", files=bad)).status_code == 400
+    paid = await signed_in("client", await make_client())
+    assert (await paid.post("/api/client/setup/from-document", files=files)).status_code == 403
+
+
+async def test_trial_test_calls_spend_the_trial_minutes_but_paid_test_calls_are_free():
+    from types import SimpleNamespace
+    from llm.client import Usage
+
+    engine = SimpleNamespace(summary=lambda: {
+        "usage": Usage(), "outcome": None, "stage_reached": "PITCH", "disclosure_played": True, "turns": 2,
+        "guard_replacements": 0, "transcript": [], "call_state": {}, "stage_history": [], "tool_log": []})
+    balances = {}
+    for trial in (True, False):
+        client = await make_client(minutes=50)
+        async with AsyncSessionLocal() as db:
+            (await db.get(Client, client)).is_trial = trial
+            await db.commit()
+        camp = await make_campaign(client)
+        lead = await make_lead(client, camp)
+        identity = CallIdentity(_id("call"), lead, camp, "+919800000098", "R", client_id=client)
+        async with AsyncSessionLocal() as db:
+            db.add(CallRecord(call_id=identity.call_id, client_id=client, lead_id=lead, campaign_id=camp,
+                              caller_id_used="browser", direction="test"))
+            await db.commit()
+        await CallRecorder(identity, console=True).finalize(engine, 60.0)
+        async with AsyncSessionLocal() as db:
+            balances[trial] = (await db.get(Client, client)).balance_seconds
+    assert balances == {True: 50 * 60 - 60, False: 50 * 60}

@@ -76,16 +76,23 @@ def _pdf_text(data: bytes) -> str:
         raise DocumentError("Could not read this PDF") from e
 
 
-def parse_document(filename: str, data: bytes) -> List[Tuple[str, str]]:
+def document_text(filename: str, data: bytes) -> str:
+    """The file's plain text, for the same file types as knowledge documents."""
     extension = os.path.splitext(filename or "")[1].lower()
     if extension not in ALLOWED_EXTENSIONS:
         raise DocumentError("Upload a .txt, .md, .csv or .pdf file")
-    if extension == ".pdf":
-        chunks = _chunks_from_text(_pdf_text(data))
-    elif extension == ".csv":
-        chunks = _chunks_from_csv(_decode(data))
+    text = _pdf_text(data) if extension == ".pdf" else _decode(data)
+    if not text.strip():
+        raise DocumentError("No readable text found in this file")
+    return text
+
+
+def parse_document(filename: str, data: bytes) -> List[Tuple[str, str]]:
+    text = document_text(filename, data)
+    if os.path.splitext(filename or "")[1].lower() == ".csv":
+        chunks = _chunks_from_csv(text)
     else:
-        chunks = _chunks_from_text(_decode(data))
+        chunks = _chunks_from_text(text)
     if not chunks:
         raise DocumentError("No readable text found in this file")
     if len(chunks) > MAX_CHUNKS:

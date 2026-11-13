@@ -85,7 +85,8 @@ class Client(Base):
     status = Column(String(16), default="active", index=True)  # active | suspended
     plan_id = Column(String(64), ForeignKey("plans.id"), nullable=True)
     balance_seconds = Column(Integer, default=0)  # kept in step with minute_ledger
-    max_concurrent_calls = Column(Integer, default=5)
+    max_concurrent_calls = Column(Integer, default=3)
+    is_trial = Column(Boolean, default=False)  # free trial: browser test calls only, until a plan is bought
 
     # What callers hear
     company_name = Column(String(128), nullable=False)
@@ -119,6 +120,25 @@ class User(Base):
     client_id = Column(String(64), ForeignKey("clients.id"), index=True, nullable=True)
     is_active = Column(Boolean, default=True)
     last_login_at = Column(DateTime, nullable=True)
+    sessions_valid_after = Column(DateTime, nullable=True)  # set on logout and password change; older sessions end
+    created_at = Column(DateTime, default=utcnow)
+
+
+class Enquiry(Base):
+    """A request to be contacted: from the landing page form, or a client asking about pricing on the Plans page."""
+
+    __tablename__ = "enquiries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    topic = Column(String(16), default="services")  # services | pricing
+    client_id = Column(String(64), ForeignKey("clients.id"), index=True, nullable=True)  # set for pricing enquiries
+    person_name = Column(String(128), nullable=False)
+    phone_number = Column(String(20), nullable=True)
+    whatsapp_number = Column(String(20), nullable=True)
+    business_name = Column(String(128), nullable=True)
+    business_type = Column(String(64), nullable=True)
+    note = Column(Text, nullable=True)
+    status = Column(String(16), default="new", index=True)  # new | contacted | converted
     created_at = Column(DateTime, default=utcnow)
 
 
@@ -187,6 +207,7 @@ class Campaign(Base):
     is_promotional = Column(Boolean, default=True)
     status = Column(String(16), default="draft", index=True)  # draft | active | paused | completed
     voice_id = Column(String(32), nullable=True)
+    language = Column(String(16), default="hinglish", nullable=False)  # hinglish (shown to clients as "Hindi") | english
     voice_pitch = Column(Float, default=0.0)
     voice_pace = Column(Float, default=1.0)
     calling_start_hour = Column(Integer, nullable=True)
@@ -571,13 +592,19 @@ class DemoSlot(Base):
 
 
 class DemoBooking(Base):
+    """A booked demo. slot_id is empty for generated sales-desk-hours slots."""
+
     __tablename__ = "demo_bookings"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     idempotency_key = Column(String(128), unique=True, nullable=False)
-    slot_id = Column(Integer, ForeignKey("demo_slots.id"), nullable=False)
+    client_id = Column(String(64), ForeignKey("clients.id"), index=True, nullable=False)
+    campaign_id = Column(String(64), index=True, nullable=True)
+    slot_id = Column(Integer, ForeignKey("demo_slots.id"), nullable=True)
     lead_id = Column(String(64), index=True, nullable=False)
     call_id = Column(String(64), nullable=True)
+    starts_at = Column(DateTime, index=True, nullable=False)  # UTC
+    duration_minutes = Column(Integer, default=15)
     created_at = Column(DateTime, default=utcnow)
 
 

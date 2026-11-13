@@ -81,11 +81,15 @@ def clamp_to_window(when: datetime, tz) -> datetime:
     return local
 
 
-def speak_time(when: datetime) -> str:
-    """Hinglish phrase for a callback time relative to today, e.g. 'kal shaam 5 baje'."""
+def speak_time(when: datetime, english: bool = False) -> str:
+    """Spoken time relative to today: 'kal shaam 5 baje', or in English 'tomorrow at 5 pm'."""
     s = get_settings()
     now = datetime.now(when.tzinfo or pytz.timezone(s.TIMEZONE))
     delta_days = (when.date() - now.date()).days
+    if english:
+        day = {0: "today", 1: "tomorrow"}.get(delta_days, "on " + when.strftime("%d %B").lstrip("0"))
+        clock = f"{when.hour % 12 or 12}:{when.minute:02d}" if when.minute else f"{when.hour % 12 or 12}"
+        return f"{day} at {clock} {'am' if when.hour < 12 else 'pm'}"
     day = {0: "aaj", 1: "kal", 2: "parso"}.get(delta_days, when.strftime("%d %B"))
     h = when.hour
     part = "subah" if h < 12 else "dopahar" if h < 16 else "shaam" if h < 20 else "raat"

@@ -22,8 +22,10 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 from agent.callback_time import parse_callback_time
 from agent.knowledge import CampaignKnowledge
 from agent.observer import CallObserver, CallState
-from agent.prompts import build_messages
-from agent.stages import CallStep, SalesStage, StageManager, extract_signals, link_consent, opt_out_clarity
+from agent.prompts import NAVIX_FACTS, build_demo_messages, build_messages
+from agent.stages import (TIME_NO, CallStep, SalesStage, StageManager, extract_signals, has_any, link_consent,
+                          opt_out_clarity)
+from config.settings import get_settings
 from agent.tools import CONFIRMED_OUTCOMES, CallIdentity, CallTools, PendingAction, record_opt_out, tool_schemas_for
 from guardrails.authorization import AuthorizationContext
 from guardrails.backchannel_filter import BackchannelFilter
@@ -37,6 +39,7 @@ from speech.phrase_cache import PreRenderedPhraseCache as P
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 3
+DEMO_BRAND = "Navix AI"
 MAX_REPLY_WORDS = 25  # beyond this, only a closing question may still be spoken
 MAX_REPLY_WORDS_WITH_QUESTION = 36
 MAX_SENTENCES_PER_REPLY = 3  # the prompt asks for 2; the third is only ever a closing question
@@ -44,6 +47,15 @@ MAX_SENTENCES_PER_REPLY = 3  # the prompt asks for 2; the third is only ever a c
 MAX_PITCH_WORDS = 45
 MAX_PITCH_WORDS_WITH_QUESTION = 55
 MAX_PITCH_SENTENCES = 4  # the prompt asks for 3; the fourth is only ever a closing question
+# Discovery and objection answers get a little more room to fit the reply to what the customer said
+MAX_DETAIL_WORDS = 32
+MAX_DETAIL_WORDS_WITH_QUESTION = 42
+DETAIL_STAGES = (SalesStage.DISCOVERY, SalesStage.OBJECTION_HANDLING)
+# The company introduction is a full introduction of the business, so it gets the most room (and tokens)
+MAX_INTRO_WORDS = 80
+MAX_INTRO_WORDS_WITH_QUESTION = 95
+MAX_INTRO_SENTENCES = 6
+INTRO_MAX_TOKENS = 320
 NAME_EVERY_REPLIES = 3  # replies that must pass before the customer's name may be used again
 OPT_OUT_CONFIRM_QUESTION = "Kya main aapka number calling list se hata doon?"
 
@@ -74,17 +86,25 @@ class DialogueEngine:
         *,
         observer_llm: Optional[LLMClient] = None,
         on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        demo: bool = False,
     ):
         self.identity = identity
         self.knowledge = knowledge
         self.llm = llm
-        self.phrases = P(voice=knowledge.voice_id, company=knowledge.company_name, persona=knowledge.persona_name,
-                         complaint_contact=knowledge.complaint_contact)
+        # The website demo speaks for Navix AI itself, not for the demo campaign's company
+        self.company = DEMO_BRAND if demo else knowledge.company_name
+        self.phrases = P(voice=knowledge.voice_id, company=self.company, persona=knowledge.persona_name,
+                         complaint_contact=knowledge.complaint_contact, language=knowledge.language)
+        self.english = knowledge.language == "english"
+        self.demo = demo  # website demo: answers questions about Navix AI only
+        self._thanks = " Thank you." if self.english else " Dhanyawaad."
         self.auth = AuthorizationContext()
+        if demo:
+            self.auth.authorize_text(NAVIX_FACTS)  # numbers in the fact sheet (50 minutes) may be said
         self.tools = CallTools(identity, knowledge, self.auth)
         self.tools.price_allowed = False  # until the customer asks, objects or wants to buy
         self.tools.amount_heard = False
-        self.stage = StageManager()
+        self.stage = StageManager(max_persuasion=get_settings().PERSUASION_MAX_ATTEMPTS)
         self.state = CallState(identity.lead_id, identity.phone_number, identity.campaign_id)
         self.observer = CallObserver(self.state, observer_llm, on_intent=self._on_late_intent)
         self.guard = OutputGuard(self.phrases.get_text(P.SAFE_GUARD_REPLACEMENT))
@@ -135,7 +155,12 @@ class DialogueEngine:
     def opening(self) -> List[Utterance]:
         """AI + recording disclosure (pre-rendered) and the right-person check."""
         disclosure = self._phrase(P.DISCLOSURE)
-        ask = Utterance(f"Kya meri baat {self.identity.customer_name} ji se ho rahi hai?")
+        name = self.identity.customer_name
+        if self.demo:
+            ask = Utterance("I'm here to answer your questions about Navix AI. What would you like to know?" if self.english
+                            else "Main yahan Navix AI ke baare mein aapke sawalon ka jawab dene ke liye hoon. Aap kya jaanna chahenge?")
+        else:
+            ask = Utterance(f"Am I speaking with {name}?" if self.english else f"Kya meri baat {name} ji se ho rahi hai?")
         self.disclosure_played = True
         for u in (disclosure, ask):
             self._say("agent", u.text, kind=u.kind)
@@ -168,6 +193,9 @@ class DialogueEngine:
             self._emit("fast_path", {"intent": fast.intent})
             return await self._handle_intent(fast.intent, text)
 
+        if self.demo:
+            return None  # no sales flow on the demo: the model answers the question
+
         if self.awaiting_opt_out_confirm:
             self.awaiting_opt_out_confirm = False
             if extract_signals(text).affirmative:
@@ -177,7 +205,11 @@ class DialogueEngine:
             return await self._schedule_from_text(text, default="kal subah")
 
         sig = extract_signals(text)
-        if self.stage.current_stage == SalesStage.OPENING and sig.permission_denied:
+        if (self.stage.current_stage == SalesStage.OPENING and sig.refusal == "soft" and has_any(text.lower(), TIME_NO)
+                and self.stage.step in (CallStep.CONFIRM_PERSON, CallStep.HOW_ARE_YOU)):
+            self.awaiting_callback_time = True  # "abhi time nahi hai" before the offer: ask when to call back
+            return self._scripted([self._phrase(P.ASK_CALLBACK_TIME)], "call_later")
+        if self.stage.current_stage == SalesStage.OPENING and sig.permission_denied and sig.refusal != "soft":
             self.opening_denials += 1
             self._end("not_interested")
             return self._scripted([self._phrase(P.PERMISSION_DENIED_CLOSE)], "permission_denied")
@@ -193,7 +225,8 @@ class DialogueEngine:
         if self.stage.step == CallStep.DECLINED:
             self._end("not_interested")
             return self._scripted([self._phrase(P.PERMISSION_DENIED_CLOSE)], "permission_denied")
-        self.tools.end_call_allowed = self.stage.step != CallStep.OFFER_AGAIN  # it still has a question to ask
+        # it still has a question to ask, or a half-meant no to answer
+        self.tools.end_call_allowed = self.stage.step != CallStep.OFFER_AGAIN and not self.stage.persuading
         if sig.asks_price or sig.wants_price or sig.objection or sig.buying_signal:
             self.tools.price_allowed = True
         self.price_requested = sig.wants_price
@@ -205,7 +238,7 @@ class DialogueEngine:
         task = asyncio.create_task(self.observer.observe_turn(text, self.last_reply))
         self._observer_tasks.add(task)
         task.add_done_callback(self._observer_tasks.discard)
-        line = self.stage.line_for_step(self.identity.customer_name)
+        line = self.stage.line_for_step(self.identity.customer_name, english=self.english)
         if line:
             return self._scripted([Utterance(line)], self.stage.step.value)
         return await self._book_chosen_slot(text, sig)
@@ -245,13 +278,19 @@ class DialogueEngine:
         if not spoken:
             return True
         words = len(" ".join(spoken).split()) + len(sentence.split())
+        if self.stage.is_company_intro_turn(bool(self.knowledge.company_intro)):
+            if sentence.rstrip().endswith("?"):
+                return len(spoken) < MAX_INTRO_SENTENCES and words <= MAX_INTRO_WORDS_WITH_QUESTION
+            return len(spoken) < MAX_INTRO_SENTENCES - 1 and words <= MAX_INTRO_WORDS
         if self.stage.is_long_turn(bool(self.knowledge.company_intro)):
             if sentence.rstrip().endswith("?"):
                 return len(spoken) < MAX_PITCH_SENTENCES and words <= MAX_PITCH_WORDS_WITH_QUESTION
             return len(spoken) < MAX_PITCH_SENTENCES - 1 and words <= MAX_PITCH_WORDS
+        detail = self.stage.current_stage in DETAIL_STAGES or self.stage.persuading
         if sentence.rstrip().endswith("?"):
-            return len(spoken) < MAX_SENTENCES_PER_REPLY and words <= MAX_REPLY_WORDS_WITH_QUESTION
-        return len(spoken) < 2 and words <= MAX_REPLY_WORDS
+            limit = MAX_DETAIL_WORDS_WITH_QUESTION if detail else MAX_REPLY_WORDS_WITH_QUESTION
+            return len(spoken) < MAX_SENTENCES_PER_REPLY and words <= limit
+        return len(spoken) < (3 if detail else 2) and words <= (MAX_DETAIL_WORDS if detail else MAX_REPLY_WORDS)
 
     def _scripted(self, utterances: List[Utterance], intent: Optional[str]) -> ScriptedTurn:
         for u in utterances:
@@ -282,7 +321,7 @@ class DialogueEngine:
             if result.get("transferred"):
                 return self._scripted([self._phrase(P.TRANSFER_TO_AGENT)], intent)
             self._end("manager_callback")
-            return self._scripted([Utterance(result["approved_phrasing"] + " Dhanyawaad.")], intent)
+            return self._scripted([Utterance(result["approved_phrasing"] + self._thanks)], intent)
         if intent == "call_later":
             when = parse_callback_time(text, tz_name=self.identity.timezone)
             if when is None:
@@ -299,7 +338,7 @@ class DialogueEngine:
         if not result.get("ok"):
             self._end("callback_requested")
             return self._scripted([self._phrase(P.GOODBYE)], "call_later")
-        return self._scripted([Utterance(result["approved_phrasing"] + " Dhanyawaad.")], "call_later")
+        return self._scripted([Utterance(result["approved_phrasing"] + self._thanks)], "call_later")
 
     async def _log_complaint(self, text: str) -> None:
         try:
@@ -415,16 +454,20 @@ class DialogueEngine:
         started = time.monotonic()
         self._name_in_reply = False
         spoken: List[str] = []
-        price_line = await self._price_line()
+        price_line = None if self.demo else await self._price_line()
         self._said_amount = None
         if price_line:
             spoken.append(price_line.text)
             amount = re.search(r"₹[\d,]+", price_line.text)
             self._said_amount = amount.group(0) if amount else None
             yield price_line
-        messages = build_messages(self.knowledge, self.stage, self.state, self.identity.customer_name,
-                                  self.history, answer, kind, offered_slots=self.tools.offered_slot_phrases,
-                                  already_said=price_line.text if price_line else None)
+        if self.demo:
+            messages = build_demo_messages(self.knowledge, self.history)
+        else:
+            messages = build_messages(self.knowledge, self.stage, self.state, self.identity.customer_name,
+                                      self.history, answer, kind, offered_slots=self.tools.offered_slot_phrases,
+                                      already_said=price_line.text if price_line else None)
+        tools = None if self.demo else tool_schemas_for(self.knowledge)
 
         ttft_ms: Optional[float] = None
         filler_played = False
@@ -437,9 +480,11 @@ class DialogueEngine:
                 round_text = ""
                 # The last round must answer in words. The tool list still has to be sent, because the
                 # API rejects a conversation that has tool results but no tools.
-                extra = {"tool_choice": "none"} if _round == MAX_TOOL_ROUNDS else None
-                async for ev in self.llm.stream_chat(messages, tools=tool_schemas_for(self.knowledge),
-                                                     extra_body=extra, purpose="reply"):
+                extra = {"tool_choice": "none"} if _round == MAX_TOOL_ROUNDS and tools else None
+                intro = self.stage.is_company_intro_turn(bool(self.knowledge.company_intro))
+                async for ev in self.llm.stream_chat(messages, tools=tools,
+                                                     extra_body=extra, purpose="reply",
+                                                     max_tokens=INTRO_MAX_TOKENS if intro else None):
                     if ev.type == "stall":
                         if not filler_played:
                             filler_played = True
@@ -468,6 +513,9 @@ class DialogueEngine:
 
                 if not tool_calls or _round == MAX_TOOL_ROUNDS:
                     break
+                if not spoken and not filler_played:  # nothing said yet: fill the tool's wait like a person would
+                    filler_played = True
+                    yield self._phrase(P.LLM_FILLER, kind="filler")
                 messages.append({"role": "assistant", "content": round_text or None, "tool_calls": [
                     {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments or "{}"},
                      **({"extra_content": tc.extra_content} if tc.extra_content else {})}
@@ -543,5 +591,7 @@ class DialogueEngine:
             "call_state": self.state.to_dict(),
             "stage_history": self.stage.history,
             "tool_log": self.tools.tool_log,
+            "demo_at": self.tools.demo_at.isoformat() if self.tools.demo_at else None,
+            "callback_at": self.tools.callback_at.isoformat() if self.tools.callback_at else None,
             "usage": total_usage,
         }

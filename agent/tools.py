@@ -126,7 +126,9 @@ SEARCH_KNOWLEDGE_SCHEMA: Dict[str, Any] = {"type": "function", "function": {
 
 def tool_schemas_for(knowledge: CampaignKnowledge) -> List[Dict[str, Any]]:
     """The knowledge tool is sent only to campaigns that have approved documents."""
-    return TOOL_SCHEMAS + [SEARCH_KNOWLEDGE_SCHEMA] if knowledge.faqs else TOOL_SCHEMAS
+    # Payment links stay in code but are not offered on calls yet
+    tools = [t for t in TOOL_SCHEMAS if t["function"]["name"] != "send_payment_link"]
+    return tools + [SEARCH_KNOWLEDGE_SCHEMA] if knowledge.faqs else tools
 
 
 def _words(text: str) -> set:
@@ -152,6 +154,8 @@ class CallTools:
         self.amount_heard: bool = True  # the dialogue engine holds this until a price or offer is given
         self.offered_slot_phrases: Dict[str, str] = {}  # the slots last offered, kept for later turns
         self.tool_log: List[Dict[str, Any]] = []
+        self.demo_at: Optional[datetime] = None  # booked demo time, sent to the CRM
+        self.callback_at: Optional[datetime] = None
         self._offered_slots: Dict[str, datetime] = {}
         self._presented_offers: Dict[tuple, Any] = {}  # offers the customer has actually heard on this call
         self._links_sent: set = set()  # a plan's link goes out once per call
@@ -178,6 +182,17 @@ class CallTools:
         self.auth.authorize_text(text)
         return text
 
+    @property
+    def english(self) -> bool:
+        return self.knowledge.language == "english"
+
+    def _say(self, hinglish: str, english: str) -> str:
+        """The approved line in the campaign's language (Hinglish unless the campaign is English)."""
+        return self._approve(english if self.english else hinglish)
+
+    def _when(self, moment: datetime) -> str:
+        return speak_time(moment, english=self.english)
+
     def _resolve_plan(self, sku: str, plan: Optional[str]) -> Optional[tuple]:
         sku = (sku or "").upper().strip()
         plan = (plan or "Monthly").strip().capitalize()
@@ -194,8 +209,12 @@ class CallTools:
             options = [f"{s}/{p}" for s, p in self.knowledge.catalog]
             return {"ok": False, "error": "unknown product or plan", "available": options}
         item = self.knowledge.catalog[key]
-        per = "per month" if item.billing_period == "monthly" else "per year"
-        phrasing = self._approve(f"{item.name} ka price ₹{int(item.price_inr):,} {per} hai.")
+        price = f"₹{int(item.price_inr):,}"
+        per = {"monthly": "per month", "annual": "per year", "yearly": "per year"}.get(item.billing_period)
+        if per:
+            phrasing = self._say(f"{item.name} ka price {price} {per} hai.", f"{item.name} costs {price} {per}.")
+        else:  # one-time and anything else: never claim a period the catalog does not state
+            phrasing = self._say(f"{item.name} ka price {price} hai, ek baar ka.", f"{item.name} costs {price}, one-time.")
         self.amount_heard = True
         self.auth.authorize_numbers([item.price_inr])
         return {"ok": True, "sku": item.sku, "plan": item.plan, "name": item.name, "price_inr": item.price_inr,
@@ -223,16 +242,18 @@ class CallTools:
             return {"ok": False, "error": "unknown product or plan"}
         offer = await self._offer_for_lead(*key)
         if offer is None:
-            return {"ok": True, "offer": None, "approved_phrasing": "Abhi is plan par koi special offer nahi hai."}
+            return {"ok": True, "offer": None, "approved_phrasing": self._say(
+                "Abhi is plan par koi special offer nahi hai.", "There is no special offer on this plan right now.")}
         self._presented_offers[key] = offer
         self.amount_heard = True
         base = self.knowledge.catalog[key].price_inr
         self.auth.authorize_numbers([offer.discount_percentage, offer.discounted_price_inr, base])
         self.auth.authorize_terms(["discount", "offer"])
-        phrasing = self._approve(
+        phrasing = self._say(
             f"Special offer mein aapko {int(offer.discount_percentage)}% discount mil raha hai, "
-            f"yaani ₹{int(base):,} ki jagah sirf ₹{int(offer.discounted_price_inr):,}."
-        )
+            f"yaani ₹{int(base):,} ki jagah sirf ₹{int(offer.discounted_price_inr):,}.",
+            f"With the special offer you get {int(offer.discount_percentage)}% off, "
+            f"so just ₹{int(offer.discounted_price_inr):,} instead of ₹{int(base):,}.")
         return {"ok": True, "offer": {"offer_id": offer.id, "discount_percentage": offer.discount_percentage,
                                       "discounted_price_inr": offer.discounted_price_inr,
                                       "original_price_inr": base},
@@ -269,9 +290,11 @@ class CallTools:
             return {"ok": False, "error": "no availability data; offer a human expert"}
         best = max(matches, key=lambda a: len(a.pincode_prefix))
         if not best.available:
-            return {"ok": True, "available": False, "approved_phrasing": self._approve("Abhi aapke area mein yeh available nahi hai.")}
+            return {"ok": True, "available": False, "approved_phrasing": self._say("Abhi aapke area mein yeh available nahi hai.",
+                                                                                 "This is not available in your area yet.")}
         self.auth.mark_action("check_availability")
-        return {"ok": True, "available": True, "approved_phrasing": self._approve(f"Aapke liye {best.eta_text} ho jayega.")}
+        return {"ok": True, "available": True, "approved_phrasing": self._say(f"Aapke liye {best.eta_text} ho jayega.",
+                                                                                f"For you: {best.eta_text}.")}
 
     async def tool_get_policy(self, topic: str) -> Dict[str, Any]:
         policy = self.knowledge.policies.get((topic or "").lower().strip())
@@ -300,13 +323,22 @@ class CallTools:
         self.offered_slot_phrases = {}
         for slot_id, start in slots[:3]:
             self._offered_slots[slot_id] = start
-            phrase = speak_time(start)
+            phrase = self._when(start)
             self.offered_slot_phrases[slot_id] = phrase
             out.append({"slot_id": slot_id, "spoken": phrase})
             self._approve(phrase + " " + start.strftime("%d %B %A"))
             self.auth.authorize_numbers([start.hour % 12 or 12, start.day])
         self.auth.authorize_numbers([15])
-        return {"ok": True, "duration_minutes": 15, "slots": out}
+        offered = [s["spoken"] for s in out[:2]]
+        if not offered:
+            return {"ok": False, "error": "no demo slots; offer a callback instead"}
+        if len(offered) == 1:
+            phrase = self._say(f"Mere paas {offered[0]} ka slot hai. Kya yeh aapke liye theek rahega?",
+                               f"I have {offered[0]}. Does that work for you?")
+        else:
+            phrase = self._say(f"Mere paas {offered[0]} ya {offered[1]} ka slot hai. Aapke liye kaunsa theek rahega?",
+                               f"I have {offered[0]} or {offered[1]}. Which one works for you?")
+        return {"ok": True, "duration_minutes": 15, "slots": out, "approved_phrasing": phrase}
 
     async def _db_demo_slots(self, tz) -> List[tuple]:
         try:
@@ -370,21 +402,25 @@ class CallTools:
             return {"ok": False, "error": "unknown slot_id; use a slot_id from DEMO SLOTS YOU OFFERED or call list_demo_slots"}
         start = self._offered_slots[slot_id]
         key = f"demo:{self.identity.call_id}:{slot_id}"
-        booked = await self._db_book_slot(slot_id, key)
+        booked = await self._db_book_slot(slot_id, key, start)
         if booked is False:
             return {"ok": False, "error": "slot just got full; offer another slot"}
         self.auth.mark_action("book_demo")
         self.outcome = "demo_booked"
-        phrase = self._approve(f"Aapka demo {speak_time(start)} ke liye book ho gaya hai. Details WhatsApp par aa jayengi.")
+        self.demo_at = start
+        # Nothing is sent yet (WhatsApp/SMS sending is planned), so the line only says details will follow
+        phrase = self._say(f"Aapka demo {speak_time(start)} ke liye book ho gaya hai. "
+                           "Is call ke baad details aapko WhatsApp ya SMS par bhej di jayengi.",
+                           f"Your demo is booked for {self._when(start)}. "
+                           "After this call, you will get the details on WhatsApp or SMS.")
         self.last_confirmation = phrase
         return {"ok": True, "booking_id": key, "approved_phrasing": phrase,
                 "next": "Say this line and thank the customer. Do not ask any more questions."}
 
-    async def _db_book_slot(self, slot_id: str, key: str) -> Optional[bool]:
-        """True booked, False full, None when no slot table (generated slots)."""
-        if slot_id.startswith("gen-"):
-            logger.info(f"DEMO BOOKED (sales desk hours): lead={self.identity.lead_id} slot={slot_id}")
-            return None
+    async def _db_book_slot(self, slot_id: str, key: str, start: datetime) -> Optional[bool]:
+        """True booked, False full, None when the booking could not be saved. Generated (sales desk hours)
+        slots have no capacity row, so they are saved without one."""
+        generated = slot_id.startswith("gen-")
         try:
             from sqlalchemy import select, update
             from database.models import DemoBooking, DemoSlot
@@ -394,13 +430,19 @@ class CallTools:
                 existing = (await db.execute(select(DemoBooking).where(DemoBooking.idempotency_key == key))).scalar()
                 if existing:
                     return True
-                res = await db.execute(update(DemoSlot).where(
-                    DemoSlot.id == int(slot_id), DemoSlot.booked_count < DemoSlot.capacity
-                ).values(booked_count=DemoSlot.booked_count + 1))
-                if res.rowcount == 0:
-                    return False
-                db.add(DemoBooking(idempotency_key=key, slot_id=int(slot_id), lead_id=self.identity.lead_id,
-                                   call_id=self.identity.call_id))
+                duration = 15
+                if not generated:
+                    res = await db.execute(update(DemoSlot).where(
+                        DemoSlot.id == int(slot_id), DemoSlot.booked_count < DemoSlot.capacity
+                    ).values(booked_count=DemoSlot.booked_count + 1))
+                    if res.rowcount == 0:
+                        return False
+                    slot = await db.get(DemoSlot, int(slot_id))
+                    duration = slot.duration_minutes if slot and slot.duration_minutes else duration
+                db.add(DemoBooking(idempotency_key=key, client_id=self.identity.client_id,
+                                   campaign_id=self.identity.campaign_id, slot_id=None if generated else int(slot_id),
+                                   lead_id=self.identity.lead_id, call_id=self.identity.call_id,
+                                   starts_at=start.astimezone(pytz.utc).replace(tzinfo=None), duration_minutes=duration))
                 await db.commit()
                 return True
         except Exception as e:
@@ -462,13 +504,17 @@ class CallTools:
             self.auth.mark_action("schedule_callback")
             if self.outcome not in CONFIRMED_OUTCOMES:
                 self.outcome = "manager_callback"
-            phrase = self._approve(f"Abhi hamare experts available nahi hain. Main {speak_time(when)} expert se callback karwa deti hoon.")
+            phrase = self._say(f"Abhi hamare experts available nahi hain. Main {speak_time(when)} team ke saath aapki "
+                               "meeting fix kar deti hoon. Is call ke baad details aapko WhatsApp ya SMS par bhej di jayengi.",
+                               f"Our experts are not available right now, so I am setting up a meeting with the team "
+                               f"{self._when(when)}. After this call, you will get the details on WhatsApp or SMS.")
             return {"ok": False, "transferred": False, "approved_phrasing": phrase}
         self.auth.mark_action("transfer_to_human")
         self.outcome = "transferred"
         self.pending_action = PendingAction("transfer", "transferred", {"to": free, "reason": reason})
         return {"ok": True, "transferred": True,
-                "approved_phrasing": self._approve("Main aapki call hamare senior expert ko transfer kar rahi hoon, line par bane rahiye.")}
+                "approved_phrasing": self._say("Main aapki call hamare senior expert ko transfer kar rahi hoon, line par bane rahiye.",
+                                               "I am transferring your call to our senior expert, please stay on the line.")}
 
     async def tool_schedule_callback(self, when: str) -> Dict[str, Any]:
         moment = parse_callback_time(when, tz_name=self.identity.timezone)
@@ -478,7 +524,8 @@ class CallTools:
         self.auth.mark_action("schedule_callback")
         if self.outcome not in CONFIRMED_OUTCOMES:
             self.outcome = "callback_scheduled"
-        phrase = self._approve(f"Theek hai, main aapko {speak_time(moment)} call karti hoon.")
+        phrase = self._say(f"Theek hai, main aapko {speak_time(moment)} call karti hoon.",
+                           f"Sure, I will call you {self._when(moment)}.")
         self.pending_action = PendingAction("end_call", self.outcome, {"callback_at": moment.isoformat()})
         return {"ok": True, "callback_at": moment.isoformat(), "approved_phrasing": phrase}
 
@@ -505,7 +552,8 @@ class CallTools:
         self.auth.mark_action("record_opt_out")
         self.outcome = "opted_out"
         self.pending_action = PendingAction("end_call", "opted_out")
-        return {"ok": True, "approved_phrasing": "Maine aapka number calling list se hata diya hai."}
+        return {"ok": True, "approved_phrasing": self._say("Maine aapka number calling list se hata diya hai.",
+                                                           "I have removed your number from our calling list.")}
 
     async def tool_end_call(self, outcome: str = "completed") -> Dict[str, Any]:
         if not self.end_call_allowed:

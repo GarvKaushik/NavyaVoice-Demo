@@ -86,6 +86,7 @@ class CampaignKnowledge:
     persona_name: str = ""
     complaint_contact: str = ""
     voice_id: str = ""
+    language: str = "hinglish"  # hinglish (shown to clients as "Hindi") | english
     caller_id: Optional[str] = None
     transfer_numbers: List[str] = field(default_factory=list)
     payment_links_enabled: bool = True
@@ -165,13 +166,13 @@ SEED_STAGE_PROMPTS: Dict[str, str] = {
         "Objection ko respect karein aur neeche diya approved answer use karein. Kabhi argue mat karein."
     ),
     "CLOSE_NEXT_STEP": (
-        "Clear next step offer karein: WhatsApp par payment link, 15-minute ka live demo, ya expert se baat. "
+        "Clear next step offer karein: 15-minute ka live demo, ya team ke saath meeting. "
         "Action hamesha tool se karein aur tool ka result aane ke baad hi confirm karein."
     ),
 }
 
 SEED_OBJECTIONS: Dict[str, str] = {
-    "price": "Samajh sakti hoon sir. Aaj offer mein yeh sirf ₹1,199 hai, kya link bhej doon?",
+    "price": "Samajh sakti hoon sir. Aaj offer mein yeh sirf ₹1,199 hai, kya ek chhota demo dikha doon?",
     "timing": "Koi baat nahi sir. Aapko kab call karna theek rahega?",
     "trust": "Bilkul sir. Data India mein hi rehta hai, aur 7-day money-back guarantee hai, koi lock-in nahi.",
     "competitor": "Aapka software accha hai sir. Hum Hinglish calling aur automatic CRM entry bhi dete hain.",
@@ -305,6 +306,7 @@ async def load_knowledge(campaign_id: str) -> CampaignKnowledge:
             complaint_contact=client.complaint_contact or s.COMPLAINT_CONTACT,
             # Stored voices are Bulbul names, so they apply only when Bulbul is speaking
             voice_id=(s.tts_voice if s.TTS_PROVIDER != "sarvam" else campaign.voice_id or client.voice_id or s.tts_voice),
+            language=campaign.language or "hinglish",
             caller_id=client.caller_id,
             transfer_numbers=list(client.transfer_numbers or []),
             payment_links_enabled=bool(client.payment_links_enabled),

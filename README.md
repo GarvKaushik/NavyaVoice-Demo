@@ -17,7 +17,7 @@ Multi-client portal, in build order. Each stage depends on the ones above it.
 | 2 | Client separation | Alembic migrations, clients and users, email login, client and admin roles, all data scoped by client, internal costs hidden from clients |
 | 3 | Per-client calling | Company name, persona, caller ID, voice and product content per client; no seed-content fallback in production |
 | 4 | Billing and limits | Calls timed from answer, minutes ledger, billing rule in plan settings, credit requests approved by an admin, new dials pause at zero |
-| 5 | Dialer and opt-outs | Separate dialer service for campaigns, retries and callbacks; global calls-per-second limit; per-client concurrent call cap; per-client opt-outs; CRM webhook sender |
+| 5 | Dialer and opt-outs | Separate dialer service for campaigns, retries and callbacks; global calls-per-second limit; per-client concurrent call cap; per-client opt-outs; CRM webhook sender (built, hidden until CRM sync is offered) |
 | 6 | Call results | Client-facing outcome labels, post-call summaries, audio recording through LiveKit Egress (off by default) |
 | 7 | Knowledge base | Document upload and processing, admin approval, approved content available on calls |
 | 8 | Dashboards | Login, admin console, client portal, browser test call through the real worker |
@@ -27,28 +27,74 @@ Agreed product rules:
 - Clients are billed per answered minute. The rule lives in plan settings because it may change.
 - An opt-out blocks a number for that client only. National DND registry entries apply to every client.
 - A client out of minutes requests more credits and an admin raises the quota. The current call finishes and new dials resume after the top-up.
-- Defaults: 5 concurrent calls per client (admin can change), 30 free browser test minutes per client per month.
+- Defaults: 3 concurrent calls per client (admin can change), 30 free browser test minutes per client per month.
 
 ### Planned changes (not built yet)
 
 Appointments and confirmations:
 
-- Save every demo booking with its date and time, including generated "sales desk hours" slots (today these are only logged).
-- Appointments page in the client portal: upcoming demos and expert callbacks per campaign, with CSV export.
-- Add the booked demo time and callback time to the CRM webhook payload.
-- Send a real WhatsApp confirmation for demos (needs approved Plivo WhatsApp templates). Until then, the agent says the team will call at the booked time instead of promising WhatsApp details.
+- Send the demo and meeting details on WhatsApp or SMS after the call (needs DLT-registered SMS templates or approved
+  WhatsApp templates). Until then, the agent only says the details will be sent after the call; nothing is sent.
+
+Every demo booking (including generated "sales desk hours" slots) is saved with its time. The client portal shows the
+next events on **Overview** and all of them on **Appointments**: demos, meetings (the customer asked for a person or
+to negotiate) and callbacks. Results are shown only in the portal for now.
+
+Future scope (not built; keep it this way until approved):
+
+- Google Calendar and Google Sheets sync for appointments.
+- Excel/CRM sync of call results. The CRM webhook sender and the appointments CSV export exist in the backend but are
+  hidden in the portal.
+- Sending SMS/WhatsApp messages and payment links. The code stays; the agent never offers a payment link.
+- MCP servers for operations (database, calendar, CRM).
 
 Lead results:
 
 - View leads per campaign: result filters with counts, search, paging, open a lead to see its calls, CSV export.
 
-Persuasion on refusal:
+Persuasion on refusal (built):
 
-- One or two polite persuasion attempts before accepting a "no" (count set in settings), offering a callback for "time nahi hai" and a WhatsApp/callback option for "interest nahi". Clear opt-outs still end the call at once.
+- A firm "no" ("bilkul nahi", "not interested", "nahi chahiye") ends the call politely. A half-meant "no" ("abhi nahi",
+  "sochna padega", "mehenga hai") gets up to `PERSUASION_MAX_ATTEMPTS` (2) polite tries, and "abhi time nahi hai"
+  before the offer gets a callback question. Opt-outs still end the call at once.
 
 Concurrency as automation (needs a decision before changing the rule above):
 
 - Hide concurrent call counts from clients; the dialer shares the platform pool across clients automatically, with the per-client cap optional (admin-only safety limit).
+
+Onboarding, accounts and security (built):
+
+- Landing page: "Enquire about services" (top bar, hero and the closing banner) scrolls to a form: name, phone and
+  WhatsApp number required, business name and type optional. Numbers are normalized; a per-visitor limit
+  (`ENQUIRIES_PER_HOUR`) and a hidden honeypot field stop spam. Beside it, four onboarding steps light up in turn
+  (You fill the form -> We contact you -> You choose a plan -> You get your login). The page has smooth entrances,
+  gentle float, card lift, springy buttons and a light sweep on the main buttons, all plain CSS and all off for
+  visitors who reduce motion.
+- Admin **Enquiries** page: every enquiry (landing form and client pricing requests) with a WhatsApp link and a
+  status (New, Contacted, Converted); the number of new ones shows in the admin sidebar.
+- **Account** page for clients and admins: change password. Changing it, or signing out, ends every other session
+  (`users.sessions_valid_after`).
+- Logins are limited per email (5 failures) and per IP address (`LOGIN_MAX_FAILURES_PER_IP`), each for 15 minutes.
+- Every response sends `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and a referrer policy; production
+  adds HSTS. No strict CSP yet (it needs tuning so it does not break the live demo audio).
+- Client **Plans** page: current plan, minutes left and used, the plans on offer (minutes only; prices are agreed
+  with the team) and "Talk to us about pricing", which creates an enquiry. More minutes stay a manual top-up.
+- Sign-up: "Sign up" / "Start free trial" on the landing page asks for email, password and phone number, creates a
+  client on a free trial, signs them in, and adds a "Trial sign-up" enquiry for the team. Limited to
+  `SIGNUPS_PER_DAY` per address. No Google login.
+- **Set up your agent** (trial clients only): company name, "About the company" and up to 10 products (name, price,
+  billing, what it does, features), saved through the same logic as the admin content editor. The first save creates
+  a "Test campaign" so Test & call works at once. "Fill from a document" (.txt, .md, .csv or .pdf) has the OpenAI
+  model (`OPENAI_API_KEY`, `OPENAI_MODEL`) fill in the form; nothing is saved until the client checks it and saves. After the trial, content is the team's to edit (it then reaches
+  real customers).
+- Free trial: from sign-up, or an admin creates the account and ticks "Free trial". The client gets
+  `TRIAL_TEST_MINUTES` (50) added to their normal minute balance; their browser test calls spend it (paid clients'
+  test calls stay free, 30 a month). They cannot start campaigns or phone calls (the dialer skips trial clients too),
+  and the sidebar shows "You're on a free trial · X min left · See plans". The admin
+  unticks it after they buy a plan and their content is reviewed.
+
+Left out on purpose: two-factor login (TOTP planned for later, required for admins), Google login, password reset by
+email (no email sending yet; an admin sets a new password), online payment for minutes (Razorpay checkout later).
 
 ## How a turn works
 
@@ -118,6 +164,11 @@ Before going live, set `AUTH_SECRET`. Recording also needs a LiveKit Egress serv
 Things worth trying in a conversation: ask the price, say it is expensive, push for "999 mein do",
 ask for a demo and pick a slot, ask for the WhatsApp link, say "abhi busy hoon, kal shaam 5 baje call karna",
 say "mujhe dobara call mat karna", say "haan" while the agent is speaking.
+
+Each campaign has a call language, chosen in the portal (Campaigns & leads): Hindi (default) or English. "Hindi" is
+the Hinglish agent (stored as `hinglish`). English switches the fixed lines, tool lines,
+prompt, Sarvam STT (`en-IN`) and Bulbul (`en-IN`). English fixed lines are not pre-rendered yet; the first English call
+synthesizes them live. With a self-hosted TTS (`TTS_PROVIDER=server`), English is not supported yet.
 
 Voice and model are `.env` settings: `BULBUL_TTS_VOICE_ID` (e.g. `simran_enhi_customer`, `ritu_hi_sales`,
 `ishita_enhi_customer`), `BULBUL_TTS_PACE`, `REALTIME_LLM_MODEL`. Re-run `python -m speech.prerender --force`

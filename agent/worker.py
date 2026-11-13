@@ -79,7 +79,7 @@ def pcm_frames(pcm: bytes, sample_rate: int):
         yield rtc.AudioFrame(data=chunk, sample_rate=sample_rate, num_channels=1, samples_per_channel=len(chunk) // 2)
 
 
-def build_stt(extra_terms: Optional[list] = None) -> lk_stt.STT:
+def build_stt(extra_terms: Optional[list] = None, language: str = "hinglish") -> lk_stt.STT:
     """Sarvam streaming STT with client flush.
 
     Local VAD decides end of turn and flushes the stream; Sarvam returns the final
@@ -94,7 +94,8 @@ def build_stt(extra_terms: Optional[list] = None) -> lk_stt.STT:
         from speech.local_stt import LocalSTT
 
         return LocalSTT(settings.STT_PROVIDER)
-    stt = sarvam.STT(language=settings.SARVAM_STT_LANGUAGE_CODE, model=settings.SARVAM_STT_MODEL,
+    code = "en-IN" if language == "english" else settings.SARVAM_STT_LANGUAGE_CODE
+    stt = sarvam.STT(language=code, model=settings.SARVAM_STT_MODEL,
                      mode=settings.SARVAM_STT_MODE, api_key=settings.SARVAM_API_KEY,
                      sample_rate=settings.SARVAM_STT_SAMPLE_RATE, flush_signal=True,
                      prompt="Product names: " + ", ".join(extra_terms or KEYTERMS))
@@ -102,11 +103,14 @@ def build_stt(extra_terms: Optional[list] = None) -> lk_stt.STT:
     return stt
 
 
-def build_tts(voice_id: Optional[str] = None) -> lk_tts.TTS:
+def build_tts(voice_id: Optional[str] = None, language: str = "hinglish") -> lk_tts.TTS:
+    english = language == "english"
+
     def make(model: str, speaker: str) -> "sarvam.TTS":
-        return sarvam.TTS(target_language_code="hi-IN", model=model, speaker=speaker,
+        # English text skips our Hindi number reading, so Bulbul's own preprocessing reads numbers and dates
+        return sarvam.TTS(target_language_code="en-IN" if english else "hi-IN", model=model, speaker=speaker,
                           speech_sample_rate=settings.BULBUL_TTS_SAMPLE_RATE, pace=settings.BULBUL_TTS_PACE,
-                          api_key=settings.SARVAM_API_KEY, output_audio_codec="linear16", enable_preprocessing=False)
+                          api_key=settings.SARVAM_API_KEY, output_audio_codec="linear16", enable_preprocessing=english)
 
     if settings.TTS_PROVIDER == "server":
         from speech.server_tts import ServerTTS
@@ -234,7 +238,7 @@ class SalesAgent(Agent):
                     self.call.on_first_audio()
                     yield frame
                 continue
-            spoken = HinglishNormalizer.normalize(sentence)
+            spoken = sentence if self.call.engine.english else HinglishNormalizer.normalize(sentence)
             self.call.recorder.add_tts_chars(len(spoken), cached=False)
             self.call.tts_started = self.call.tts_started or time.monotonic()
             collected = bytearray()
@@ -556,9 +560,10 @@ async def entrypoint(ctx: JobContext) -> None:
         ctx.shutdown(reason="no_approved_content")
         return
     llm_client = LLMClient.realtime()
-    engine = DialogueEngine(identity, knowledge, llm_client, observer_llm=llm_client)
+    engine = DialogueEngine(identity, knowledge, llm_client, observer_llm=llm_client, demo=bool(meta.get("demo")))
     # Each client's phrases and each voice's sentence cache load once per worker process
-    phrase_key = (knowledge.voice_id, knowledge.company_name, knowledge.persona_name, knowledge.complaint_contact)
+    phrase_key = (knowledge.voice_id, engine.company, knowledge.persona_name, knowledge.complaint_contact,
+                  knowledge.language)
     phrases = ctx.proc.userdata["phrases"].get(phrase_key)
     if phrases is None:
         engine.phrases.load()
@@ -572,11 +577,11 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.add_shutdown_callback(call.finalize)
     ctx.add_shutdown_callback(llm_client.aclose)
 
-    tts = build_tts(knowledge.voice_id)
+    tts = build_tts(knowledge.voice_id, knowledge.language)
     if settings.TTS_PROVIDER == "server":
         ctx.add_shutdown_callback(tts.aclose)  # closes the call's connection to the TTS service
     session = AgentSession(
-        stt=build_stt([knowledge.company_name] + sorted({c.name for c in knowledge.catalog.values()})),
+        stt=build_stt([knowledge.company_name] + sorted({c.name for c in knowledge.catalog.values()}), knowledge.language),
         tts=tts,
         llm=placeholder_llm(),
         vad=ctx.proc.userdata["vad"],

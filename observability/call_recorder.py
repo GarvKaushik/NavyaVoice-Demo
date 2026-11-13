@@ -185,7 +185,7 @@ class CallRecorder:
             return
         try:
             from campaign.billing import debit_call
-            from database.models import CallRecord, CRMOutbox, utcnow
+            from database.models import CallRecord, Client, CRMOutbox, utcnow
             from database.session import AsyncSessionLocal
 
             async with AsyncSessionLocal() as db:
@@ -217,13 +217,18 @@ class CallRecorder:
                 rec.call_state = _jsonable({**summary["call_state"], "tool_log": summary["tool_log"],
                                             "stage_history": summary["stage_history"]})
                 rec.error = self.error
-                if not self.console and rec.answered_at is not None:
+                bill = not self.console and rec.answered_at is not None
+                if self.console and rec.direction == "test":  # a free trial's test calls use its trial minutes
+                    owner = await db.get(Client, rec.client_id)
+                    bill = bool(owner and owner.is_trial)
+                if bill:
                     rec.client_billed_seconds = await debit_call(db, rec.client_id, rec.call_id, int(duration_seconds))
                 if outcome in CRM_OUTCOMES and not self.console:
                     db.add(CRMOutbox(client_id=rec.client_id, event_type=f"call.{outcome}", payload=_jsonable({
                         "call_id": self.identity.call_id, "lead_id": self.identity.lead_id,
                         "campaign_id": self.identity.campaign_id, "outcome": outcome,
-                        "stage_reached": summary["stage_reached"], "call_state": summary["call_state"]})))
+                        "stage_reached": summary["stage_reached"], "call_state": summary["call_state"],
+                        "demo_at": summary.get("demo_at"), "callback_at": summary.get("callback_at")})))
                 await db.commit()
             if not self.console:
                 await self._update_lead(outcome)

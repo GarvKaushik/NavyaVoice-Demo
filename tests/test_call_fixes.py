@@ -226,6 +226,16 @@ def test_company_is_introduced_before_the_product_and_other_services_are_listed(
     assert "Reminder" not in system  # only the first sentence of each other service
     assert "Do not name the product yet" in system
     assert e.stage.is_long_turn(company_intro=True)  # the introduction gets room to explain
+    e.stage.current_stage, e.stage.step = SalesStage.PITCH, CallStep.EXPLAIN
+    assert "batane ke liye call kar rahi thi" in e.stage.goal_for_step("Rajesh", "Acme", True, "Nexus AI Agents")
+    e.stage.explanations = 1
+    assert "batane ke liye call kar rahi thi" not in e.stage.goal_for_step("Rajesh", "Acme", True, "Nexus AI Agents")
+    e.stage.current_stage, e.stage.step = SalesStage.OPENING, CallStep.OFFER
+    intro = ["Achha laga sunke.", "Main Acme se bol rahi hoon, hum businesses ke liye AI agents, software aur "
+             "websites banate hain.", "Hamara goal hai ki har business kam kharche mein zyada customers tak pahunche "
+             "aur unka kaam aasaan ho.", "Aaj main aapko ek aisi service ke baare mein batane ke liye call kar rahi "
+             "hoon jo aapke business ke kaam aa sakti hai.", "Kya main aapke do minute le sakti hoon?"]
+    assert all(e._fits_reply(s, intro[:i]) for i, s in enumerate(intro))  # the full introduction is spoken
 
     plain = StageManager()
     plain.current_stage, plain.step = SalesStage.OPENING, CallStep.OFFER
@@ -447,3 +457,22 @@ async def test_a_question_after_a_booking_is_still_answered():
     e.tools.outcome = "demo_booked"
     e.stage.transition_to(SalesStage.COMPLETED, "test")
     assert await e.pre_turn("demo kaise hoga") is None
+
+
+async def test_website_demo_answers_navix_questions_only_with_no_sales_flow():
+    llm = RecordingLLM([[LLMEvent("text", text="Navix AI aapke leads ko khud call karta hai. ")]])
+    e = DialogueEngine(CallIdentity("demo_x", "LEAD-TEST-001", "CAMP-REENGAGE-Q4", "+10000000000", "ji"),
+                       seed_knowledge(), llm, demo=True)
+    opening = e.opening()
+    assert "Navix AI ke baare mein aapke sawalon" in opening[1].text  # no "am I speaking to ..." check
+    assert "Navix AI ki taraf se" in opening[0].text  # the disclosure names Navix AI, not the demo campaign's company
+    assert await e.pre_turn("Ye kya karta hai aur price kya hai?") is None  # no stage logic, no scripted price
+    said = [u.text async for u in e.stream_reply()]
+    assert said == ["Navix AI aapke leads ko khud call karta hai."]
+    request = llm.requests[0]
+    assert request["tools"] is None  # no booking, price or callback tools
+    system = request["messages"][0]["content"]
+    assert "Answer only questions about Navix AI" in system and "NAVIX AI FACTS" in system
+    assert "CURRENT STAGE" not in system  # none of the sales flow
+    turn = await e.pre_turn("mujhe dobara call mat karna")
+    assert turn is not None and turn.intent == "opt_out"  # safety checks still run on the demo

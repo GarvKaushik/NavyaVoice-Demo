@@ -58,7 +58,8 @@ class DialService:
         """Clients with minutes left, and their concurrent call caps."""
         async with AsyncSessionLocal() as db:
             rows = await db.execute(select(Client.id, Client.max_concurrent_calls).where(
-                Client.status == "active", Client.balance_seconds > 0).order_by(Client.id))
+                Client.status == "active", Client.balance_seconds > 0,
+                Client.is_trial.is_not(True)).order_by(Client.id))  # trials make browser test calls only
             return {client_id: cap or 0 for client_id, cap in rows.all()}
 
     async def _claim(self, client_id: str) -> Optional[tuple]:

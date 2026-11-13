@@ -50,7 +50,7 @@ export default function DemoCall({ fallback }: { fallback: ReactNode }) {
       : ended ? "Call ended. You can talk again." : "Free demo, no sign-up";
 
   return (
-    <section aria-label="Talk to the agent" className="glass rounded-3xl p-6">
+    <section aria-label="Talk to the agent" className="glass glass-liquid glass-frost rounded-3xl p-6">
       <div className="flex items-center justify-between text-xs text-gray-600">
         <span>Live demo · Hinglish sales call</span>
         {live && <span className="tabular-nums text-gray-700">{clock(left)} left</span>}
