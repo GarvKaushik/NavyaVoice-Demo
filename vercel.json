@@ -1,0 +1,19 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "regions": ["bom1"],
+  "buildCommand": "cd frontend && npm ci && npm run build",
+  "functions": {
+    "index.py": {
+      "excludeFiles": "{frontend/node_modules/**,frontend/src/**,scripts/**,offline/**,Dockerfile,docker-compose.yml}"
+    }
+  },
+  "daemons": {
+    "background": {
+      "root": "./",
+      "entrypoint": "Dockerfile",
+      "command": ["python", "-m", "campaign.background"],
+      "instances": { "bom1": 1 },
+      "resources": { "requests": { "memory": "1Gi" } }
+    }
+  }
+}

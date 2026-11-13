@@ -1,0 +1,50 @@
+# Files never uploaded to Vercel. Without this file the CLI uploads everything in the folder.
+
+# Secrets and local config
+.env
+.env.*
+outbound-trunk.json
+deployment.md
+dump.sql
+*.pem
+*.key
+.claude/
+CLAUDE.md
+
+# Local environments, dependencies and builds (the frontend is built on Vercel)
+.venv/
+.venv-*/
+venv/
+frontend/node_modules/
+frontend/dist/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+*.tsbuildinfo
+
+# Not used in production
+tests/
+doc/
+k8s/
+deploy/
+samples/
+models/
+assets/phrases/listen/
+assets/phrases/local/
+assets/*_voices/
+*.drawio
+*.docx
+benchmark_results.json
+stt_bakeoff*.csv
+tts_check.wav
+*.log
+*.db
+*.sqlite
+*.sqlite3
+.vscode/
+.idea/
+
+# Recorded lines of voices outside the current plan (self-hosted and OpenAI TTS)
+assets/phrases/**/hi_IN-priyamvada-medium/
+assets/phrases/**/marin/
+assets/phrases/**/maya-*/

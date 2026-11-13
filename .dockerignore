@@ -48,8 +48,6 @@ assets/phrases/listen/
 assets/phrases/local/
 
 # Deployment files and OS or editor files
-Dockerfile
-.dockerignore
 docker-compose.yml
 k8s/
 **/.DS_Store
@@ -57,7 +55,6 @@ k8s/
 **/desktop.ini
 .vscode/
 .idea/
-assets/phrases/
 tts_check.wav
 
 deploy/
@@ -68,3 +65,8 @@ assets/*_voices/
 
 # LiveKit SIP trunk file (holds the provider password)
 outbound-trunk.json
+
+# Recorded lines of voices outside the current plan (self-hosted and OpenAI TTS)
+assets/phrases/**/hi_IN-priyamvada-medium/
+assets/phrases/**/marin/
+assets/phrases/**/maya-*/

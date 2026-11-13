@@ -48,7 +48,6 @@ stt_bakeoff*.csv
 # Bake-off recordings, which can contain real voices
 samples/
 CLAUDE.md
-assets/phrases/
 tts_check.wav
 .claude/
 # Voice listening tests (python -m modal run deploy/modal_tts.py::samples)
@@ -56,3 +55,11 @@ assets/*_voices/
 
 # LiveKit SIP trunk file (holds the provider password)
 outbound-trunk.json
+
+# Private deployment notes
+deployment.md
+
+# Recorded lines of voices outside the current plan (self-hosted and OpenAI TTS)
+assets/phrases/**/hi_IN-priyamvada-medium/
+assets/phrases/**/marin/
+assets/phrases/**/maya-*/
